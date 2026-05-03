@@ -41,8 +41,13 @@ export const rooms = pgTable('rooms', {
   lastStatusChange: timestamp('last_status_change').defaultNow().notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-})
 
+  // Out of Order fields
+  outOfOrder: boolean('out_of_order').default(false).notNull(),
+  outOfOrderReason: text('out_of_order_reason'),
+  outOfOrderSince: timestamp('out_of_order_since'),
+  outOfOrderSetBy: uuid('out_of_order_set_by').references(() => staff.id),
+})
 // Room status history (audit log)
 export const roomStatusEvents = pgTable('room_status_events', {
   id: uuid('id').primaryKey().defaultRandom(),

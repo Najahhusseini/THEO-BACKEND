@@ -52,24 +52,57 @@ export async function clockOut(staffId: string) {
   return result.rows[0]
 }
 
-// Get current status
+// Get current status (includes clockInTime for frontend)
 export async function getCurrentStatus(staffId: string) {
   const activeShift = await db.execute(sql`
-    SELECT id, clock_in, clock_out FROM attendance 
+    SELECT id, clock_in FROM attendance 
     WHERE staff_id = ${staffId} 
     AND clock_out IS NULL 
     ORDER BY clock_in DESC 
     LIMIT 1
   `)
   
+  const isClockedIn = activeShift.rows.length > 0
+  const clockInTime = isClockedIn ? activeShift.rows[0].clock_in : null
+  
   return {
-    isClockedIn: activeShift.rows.length > 0,
+    isClockedIn,
+    clockInTime,
     shift: activeShift.rows[0] || null,
   }
 }
 
-// Get today's attendance for a tenant
-export async function getTodayAttendance(tenantId: string) {
+// Get today's attendance for a specific staff member (for shift tracker)
+export async function getTodayAttendance(staffId: string) {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  
+  const result = await db.execute(sql`
+    SELECT 
+      id,
+      clock_in,
+      clock_out,
+      location,
+      device_info,
+      EXTRACT(EPOCH FROM (clock_out - clock_in)) / 60 as duration_minutes
+    FROM attendance 
+    WHERE staff_id = ${staffId} 
+      AND clock_in >= ${today.toISOString()}
+    ORDER BY clock_in DESC
+  `)
+  
+  return result.rows.map(row => ({
+    id: row.id,
+    clock_in: row.clock_in,
+    clock_out: row.clock_out,
+    duration_minutes: row.duration_minutes ? Math.round(parseFloat(row.duration_minutes)) : null,
+    location: row.location,
+    device_info: row.device_info,
+  }))
+}
+
+// Get today's attendance for all staff (manager only)
+export async function getAllStaffTodayAttendance(tenantId: string) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   
@@ -89,7 +122,6 @@ export async function getTodayAttendance(tenantId: string) {
     ORDER BY s.name
   `)
   
-  // Process results
   const grouped = new Map()
   for (const record of result.rows) {
     if (!grouped.has(record.staff_id)) {
@@ -117,56 +149,102 @@ export async function getTodayAttendance(tenantId: string) {
   return Array.from(grouped.values())
 }
 
-// Get weekly hours
+// Get weekly hours (Monday to Sunday)
 export async function getWeeklyHours(staffId: string) {
-  const startOfWeek = new Date()
-  startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay())
-  startOfWeek.setHours(0, 0, 0, 0)
-  
+  // PostgreSQL week starts on Monday by default with DATE_TRUNC('week', ...)
   const result = await db.execute(sql`
     SELECT 
       DATE(clock_in) as day,
       EXTRACT(EPOCH FROM (clock_out - clock_in)) / 3600 as hours
     FROM attendance 
     WHERE staff_id = ${staffId} 
-      AND clock_in >= ${startOfWeek.toISOString()}
+      AND clock_in >= DATE_TRUNC('week', CURRENT_DATE)
       AND clock_out IS NOT NULL
   `)
   
   const totalHours = result.rows.reduce((sum, row) => sum + (parseFloat(row.hours) || 0), 0)
+  const daysWorked = result.rows.length
+  const averageHours = daysWorked > 0 ? totalHours / daysWorked : 0
   
   return {
-    daily: result.rows.map(row => ({ day: row.day, hoursWorked: parseFloat(row.hours) || 0, overtimeHours: 0 })),
-    totalHours: totalHours,
+    total_hours: totalHours,
+    days_worked: daysWorked,
+    average_hours: averageHours,
     totalOvertime: 0,
     remainingHours: Math.max(0, 40 - totalHours),
   }
 }
 
-// Get shift history
+// Get shift history (last N days)
 export async function getShiftHistory(staffId: string, days: number = 30) {
   const startDate = new Date()
   startDate.setDate(startDate.getDate() - days)
   
   const result = await db.execute(sql`
-    SELECT * FROM attendance 
+    SELECT 
+      id,
+      clock_in,
+      clock_out,
+      EXTRACT(EPOCH FROM (clock_out - clock_in)) / 3600 as hours_worked,
+      0 as overtime_hours,
+      location
+    FROM attendance 
     WHERE staff_id = ${staffId} 
       AND clock_in >= ${startDate.toISOString()}
     ORDER BY clock_in DESC
   `)
   
-  return result.rows
+  return result.rows.map(row => ({
+    id: row.id,
+    clockIn: row.clock_in,
+    clockOut: row.clock_out,
+    hoursWorked: parseFloat(row.hours_worked) || 0,
+    overtimeHours: parseFloat(row.overtime_hours) || 0,
+    shiftType: row.clock_in && new Date(row.clock_in).getHours() > 9 ? 'late' : 'regular',
+    location: row.location || '',
+  }))
 }
 
-// Placeholder functions
+// Time off functions
 export async function requestTimeOff(staffId: string, startDate: Date, endDate: Date, reason: string) {
-  return { success: true, message: 'Request submitted' }
+  const result = await db.execute(sql`
+    INSERT INTO time_off_requests (staff_id, start_date, end_date, reason, status)
+    VALUES (${staffId}, ${startDate.toISOString()}, ${endDate.toISOString()}, ${reason}, 'pending')
+    RETURNING *
+  `)
+  return result.rows[0]
 }
 
 export async function getTimeOffRequests(tenantId: string, status?: string) {
-  return []
+  let query = sql`
+    SELECT 
+      tor.*,
+      s.name as staff_name,
+      s.email as staff_email
+    FROM time_off_requests tor
+    JOIN staff s ON tor.staff_id = s.id
+    WHERE s.tenant_id = ${tenantId}
+  `
+  
+  if (status) {
+    query = sql`${query} AND tor.status = ${status}`
+  }
+  
+  query = sql`${query} ORDER BY tor.created_at DESC`
+  
+  const result = await db.execute(query)
+  return result.rows
 }
 
 export async function updateTimeOffRequest(requestId: string, status: string, approvedBy: string) {
-  return { success: true }
+  const result = await db.execute(sql`
+    UPDATE time_off_requests 
+    SET status = ${status}, 
+        approved_by = ${approvedBy}, 
+        approved_at = NOW(),
+        updated_at = NOW()
+    WHERE id = ${requestId}
+    RETURNING *
+  `)
+  return result.rows[0]
 }

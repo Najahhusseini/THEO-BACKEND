@@ -6,7 +6,13 @@ import { secureHeaders } from 'hono/secure-headers'
 import auth from './modules/auth/auth.routes'
 import rooms from './modules/rooms/rooms.routes'
 import attendance from './modules/attendance/attendance.routes'
+import cleaning from './modules/cleaning/cleaning.routes'
 import schedule from './modules/schedule/schedule.routes'
+import tasks from './modules/tasks/tasks.routes'
+import supplies from './modules/supplies/supplies.routes'
+import notifications from './modules/notifications/notifications.routes'
+import reservations from './modules/reservations/reservation.routes'
+import emailRouter from './modules/email/email.routes'   // ADD THIS
 import { authMiddleware } from './middleware/auth'
 import 'dotenv/config'
 
@@ -15,10 +21,10 @@ const app = new Hono()
 // Global middleware
 app.use('*', logger())
 app.use('*', cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:3002', 'http://192.168.8.206:3000', 'http://192.168.9.125:3000'],
-  credentials: true,
-  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization'],
+    origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:3002', 'http://192.168.1.112:3000', 'http://192.168.1.109:3000'], 
+    credentials: true,
+    allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use('*', secureHeaders())
 
@@ -38,6 +44,29 @@ app.route('/api/attendance', attendance)
 app.use('/api/schedule/*', authMiddleware)
 app.route('/api/schedule', schedule)
 
+app.use('/api/notifications/*', authMiddleware)
+app.route('/api/notifications', notifications)
+
+app.use('/api/cleaning/*', authMiddleware)
+app.route('/api/cleaning', cleaning)
+
+app.use('/api/tasks/*', authMiddleware)
+app.route('/api/tasks', tasks)
+
+app.use('/api/supplies/*', authMiddleware)
+app.route('/api/supplies', supplies)
+
+// ========== RESERVATIONS: Protect all except public-test ==========
+app.use('/api/reservations/*', async (c, next) => {
+    if (c.req.path === '/public-test') return next()
+    return authMiddleware(c, next)
+})
+app.route('/api/reservations', reservations)
+
+// ========== EMAIL INGESTION ROUTES ==========
+app.use('/api/emails/*', authMiddleware)
+app.route('/api/emails', emailRouter)
+
 // API home
 app.get('/api', (c) => c.json({ message: 'THEO Mini API v1' }))
 
@@ -46,6 +75,7 @@ const port = parseInt(process.env.PORT || '4000')
 serve({
   fetch: app.fetch,
   port,
+  hostname: '0.0.0.0',
 })
 
 console.log(`🚀 THEO Mini backend running at http://localhost:${port}`)
@@ -54,3 +84,6 @@ console.log(`🔐 Auth endpoint: http://localhost:${port}/api/auth/login`)
 console.log(`🏨 Rooms endpoint: http://localhost:${port}/api/rooms`)
 console.log(`⏰ Attendance endpoint: http://localhost:${port}/api/attendance`)
 console.log(`📅 Schedule endpoint: http://localhost:${port}/api/schedule`)
+console.log(`📢 Notifications endpoint: http://localhost:${port}/api/notifications`)
+console.log(`🧹 Cleaning endpoint: http://localhost:${port}/api/cleaning`)
+console.log(`📦 Supplies endpoint: http://localhost:${port}/api/supplies`)

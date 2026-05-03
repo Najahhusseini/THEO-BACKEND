@@ -8,6 +8,13 @@
       "when": 1775302520970,
       "tag": "0000_first_lyja",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1777450965182,
+      "tag": "0001_slim_thena",
+      "breakpoints": true
     }
   ]
 }

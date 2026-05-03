@@ -8,6 +8,7 @@ import {
   getStaffSchedule,
   getExpectedArrivals
 } from './schedule.service'
+import { sendNotificationToTenant } from '../notifications/notification.service'
 
 const schedule = new Hono()
 
@@ -28,7 +29,8 @@ schedule.get('/staff', async (c) => {
 schedule.get('/weekly/:weekStart', async (c) => {
   const user = c.get('user')
   const { weekStart } = c.req.param()
-  const data = await getWeeklySchedule(user.tenantId, weekStart)
+  const department = c.req.query('department') || 'all'
+  const data = await getWeeklySchedule(user.tenantId, weekStart, department)
   return c.json(data)
 })
 
@@ -50,11 +52,29 @@ schedule.post('/save', async (c) => {
 
 // Publish schedule
 schedule.post('/publish/:scheduleId', async (c) => {
+  const user = c.get('user')
   const { scheduleId } = c.req.param()
   const result = await publishSchedule(scheduleId)
+  
+  // Send notifications to all staff
+  if (result) {
+    const weekStart = result.week_start_date
+    const weekEnd = result.week_end_date
+    const formattedStart = new Date(weekStart).toLocaleDateString()
+    const formattedEnd = new Date(weekEnd).toLocaleDateString()
+    
+    // Send notification asynchronously (don't wait for it to complete)
+    sendNotificationToTenant(
+      user.tenantId,
+      '📅 New Schedule Published',
+      `The schedule for ${formattedStart} - ${formattedEnd} has been published. Check your shifts!`,
+      '/schedule-icon.png',
+      '/dashboard?tab=schedule'
+    ).catch(err => console.error('Failed to send notifications:', err))
+  }
+  
   return c.json(result)
 })
-
 // Get my schedule (for staff)
 schedule.get('/my-schedule', async (c) => {
   const user = c.get('user')

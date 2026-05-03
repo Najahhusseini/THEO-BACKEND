@@ -8,53 +8,105 @@ export async function getShiftTypes() {
   return result.rows
 }
 
-export async function getStaffForTenant(tenantId: string) {
-  const result = await db.execute(sql`
-    SELECT id, name, role, email FROM staff 
+export async function getStaffForTenant(tenantId: string, role?: string) {
+  let query = sql`
+    SELECT id, name, role, email, sub_role FROM staff 
     WHERE tenant_id = ${tenantId} AND active = true 
-    ORDER BY name
-  `)
+  `
+  // If role is 'housekeeping', also include 'head_housekeeping' since they are housekeeping staff
+  if (role === 'housekeeping') {
+    query = sql`${query} AND (role = 'housekeeping' OR role = 'head_housekeeping')`
+  } else if (role && role !== 'all') {
+    query = sql`${query} AND role = ${role}`
+  }
+  query = sql`${query} ORDER BY name`
+  
+  const result = await db.execute(query)
   return result.rows
 }
 
-export async function getWeeklySchedule(tenantId: string, weekStartDate: string) {
-  // Get or create schedule for this week
-  let schedule = await db.execute(sql`
-    SELECT * FROM weekly_schedules 
-    WHERE tenant_id = ${tenantId} AND week_start_date = ${weekStartDate}
-  `)
+export async function getWeeklySchedule(tenantId: string, weekStartDate: string, department: string = 'all') {
+  let scheduleRows
+  let scheduleQuery
   
-  if (schedule.rows.length === 0) {
-    const weekEnd = new Date(weekStartDate)
-    weekEnd.setDate(weekEnd.getDate() + 6)
-    
-    const newSchedule = await db.execute(sql`
-      INSERT INTO weekly_schedules (tenant_id, week_start_date, week_end_date)
-      VALUES (${tenantId}, ${weekStartDate}, ${weekEnd.toISOString().split('T')[0]})
-      RETURNING *
+  // First, ensure department column exists (run this once)
+  try {
+    await db.execute(sql`
+      ALTER TABLE weekly_schedules ADD COLUMN IF NOT EXISTS department VARCHAR(50) DEFAULT 'all'
     `)
-    schedule = newSchedule
+  } catch (error) {
+    // Column might already exist, ignore error
   }
   
-  // Get shifts for this schedule
+  // Query with department
+  try {
+    scheduleQuery = await db.execute(sql`
+      SELECT * FROM weekly_schedules 
+      WHERE tenant_id = ${tenantId} 
+        AND week_start_date = ${weekStartDate}
+        AND department = ${department}
+    `)
+    scheduleRows = scheduleQuery.rows
+  } catch (error) {
+    // If department column doesn't exist yet, query without it
+    console.log('Department column not found, using fallback query')
+    scheduleQuery = await db.execute(sql`
+      SELECT * FROM weekly_schedules 
+      WHERE tenant_id = ${tenantId} 
+        AND week_start_date = ${weekStartDate}
+    `)
+    scheduleRows = scheduleQuery.rows
+  }
+  
+  if (scheduleRows.length === 0) {
+    const weekEnd = new Date(weekStartDate)
+    weekEnd.setDate(weekEnd.getDate() + 6)
+    const weekEndStr = weekEnd.toISOString().split('T')[0]
+    
+    // Try to insert with department, using ON CONFLICT to handle duplicates
+    try {
+      const newSchedule = await db.execute(sql`
+        INSERT INTO weekly_schedules (tenant_id, week_start_date, week_end_date, department)
+        VALUES (${tenantId}, ${weekStartDate}, ${weekEndStr}, ${department})
+        ON CONFLICT (tenant_id, week_start_date, department) 
+        DO UPDATE SET week_end_date = EXCLUDED.week_end_date
+        RETURNING *
+      `)
+      scheduleRows = newSchedule.rows
+    } catch (error) {
+      // Fallback without department column
+      const newSchedule = await db.execute(sql`
+        INSERT INTO weekly_schedules (tenant_id, week_start_date, week_end_date)
+        VALUES (${tenantId}, ${weekStartDate}, ${weekEndStr})
+        ON CONFLICT (tenant_id, week_start_date) 
+        DO UPDATE SET week_end_date = EXCLUDED.week_end_date
+        RETURNING *
+      `)
+      scheduleRows = newSchedule.rows
+    }
+  }
+  
+  // Get shifts for this schedule including notes and sub_role
   const shifts = await db.execute(sql`
     SELECT 
       ss.*,
       s.name as staff_name,
       s.role as staff_role,
+      s.sub_role,
       st.name as shift_name,
       st.code as shift_code,
       st.start_time,
       st.end_time,
-      st.color
+      st.color,
+      ss.notes
     FROM schedule_shifts ss
     JOIN staff s ON ss.staff_id = s.id
     JOIN shift_types st ON ss.shift_type_id = st.id
-    WHERE ss.schedule_id = ${schedule.rows[0].id}
+    WHERE ss.schedule_id = ${scheduleRows[0].id}
   `)
   
   return {
-    schedule: schedule.rows[0],
+    schedule: scheduleRows[0],
     shifts: shifts.rows,
   }
 }
@@ -105,7 +157,8 @@ export async function getStaffSchedule(staffId: string, weekStartDate?: string) 
       st.start_time,
       st.end_time,
       st.color,
-      ss.notes
+      ss.notes,
+      ws.department
     FROM weekly_schedules ws
     JOIN schedule_shifts ss ON ws.id = ss.schedule_id
     JOIN shift_types st ON ss.shift_type_id = st.id

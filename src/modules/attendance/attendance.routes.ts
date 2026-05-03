@@ -26,31 +26,29 @@ attendance.post('/clock-out', async (c) => {
   }
 })
 
-// Get current status
+// Get current status (for current staff member)
 attendance.get('/status', async (c) => {
   const user = c.get('user')
   const status = await getCurrentStatus(user.staffId)
   return c.json(status)
 })
 
-// Get today's attendance (manager only)
+// Get today's attendance for the current staff member (not just managers)
 attendance.get('/today', async (c) => {
   const user = c.get('user')
-  if (user.role !== 'admin' && user.role !== 'manager') {
-    return c.json({ error: 'Unauthorized' }, 403)
-  }
-  const attendanceData = await getTodayAttendance(user.tenantId)
+  // Get only the current staff member's attendance for today
+  const attendanceData = await getTodayAttendance(user.staffId)
   return c.json(attendanceData)
 })
 
-// Get weekly hours
+// Get weekly hours for the current staff member
 attendance.get('/weekly-hours', async (c) => {
   const user = c.get('user')
   const weeklyHours = await getWeeklyHours(user.staffId)
   return c.json(weeklyHours)
 })
 
-// Get shift history
+// Get shift history for the current staff member
 attendance.get('/history', async (c) => {
   const user = c.get('user')
   const days = parseInt(c.req.query('days') || '30')
@@ -70,7 +68,7 @@ attendance.post('/time-off', async (c) => {
   }
 })
 
-// Get time off requests (manager only)
+// Get time off requests (manager only - view all team requests)
 attendance.get('/time-off-requests', async (c) => {
   const user = c.get('user')
   if (user.role !== 'admin' && user.role !== 'manager') {
