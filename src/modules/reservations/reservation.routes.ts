@@ -92,6 +92,93 @@ reservations.get('/stays', async (c) => {
     }
 })
 
+// ========== Check‑in a stay ==========
+reservations.post('/stays/:stayId/check-in', async (c) => {
+    const user = c.get('user')
+    if (!user) return c.json({ error: 'Unauthorized' }, 401)
+    if (!['admin', 'manager', 'reservation_manager', 'frontdesk'].includes(user.role)) {
+        return c.json({ error: 'Forbidden' }, 403)
+    }
+
+    const { stayId } = c.req.param()
+    try {
+        const result = await db.execute(sql`
+            UPDATE stays
+            SET status = 'checked_in', updated_at = NOW()
+            WHERE id = ${stayId}
+            RETURNING *
+        `)
+        if (result.rows.length === 0) {
+            return c.json({ error: 'Stay not found' }, 404)
+        }
+        return c.json(result.rows[0])
+    } catch (err: any) {
+        console.error('Check‑in error:', err)
+        return c.json({ error: err.message }, 500)
+    }
+})
+
+// ========== Move a stay to a different room ==========
+reservations.patch('/stays/:stayId/move-room', async (c) => {
+    const user = c.get('user')
+    if (!user) return c.json({ error: 'Unauthorized' }, 401)
+    if (!['admin', 'manager', 'head_housekeeping'].includes(user.role)) {
+        return c.json({ error: 'Forbidden' }, 403)
+    }
+
+    const { stayId } = c.req.param()
+    const { roomNumber } = await c.req.json()
+    if (!roomNumber) return c.json({ error: 'roomNumber required' }, 400)
+
+    const roomCheck = await db.execute(sql`
+        SELECT room_number, out_of_order FROM rooms
+        WHERE room_number = ${roomNumber} AND tenant_id = ${user.tenantId}
+    `)
+    if (roomCheck.rows.length === 0) return c.json({ error: 'Room not found' }, 404)
+    if (roomCheck.rows[0].out_of_order) return c.json({ error: 'Room is out of order' }, 400)
+
+    const stay = await db.execute(sql`SELECT * FROM stays WHERE id = ${stayId}`)
+    if (stay.rows.length === 0) return c.json({ error: 'Stay not found' }, 404)
+    const currentStay = stay.rows[0]
+
+    const overlap = await db.execute(sql`
+        SELECT id FROM stays
+        WHERE room_number = ${roomNumber}
+          AND id != ${stayId}
+          AND status != 'checked_out'
+          AND arrival_date <= ${currentStay.departure_date}
+          AND departure_date >= ${currentStay.arrival_date}
+    `)
+    if (overlap.rows.length > 0) {
+        return c.json({ error: 'Target room is already booked for those dates' }, 409)
+    }
+
+    await db.execute(sql`
+        UPDATE stays SET room_number = ${roomNumber}, updated_at = NOW()
+        WHERE id = ${stayId}
+    `)
+
+    // ✨ Notify about reassignment
+    await db.execute(sql`
+        INSERT INTO notifications (id, tenant_id, staff_id, type, title, message, reference_type, reference_id, created_at, updated_at)
+        VALUES (
+            gen_random_uuid(),
+            ${user.tenantId},
+            NULL,
+            'guest_moved',
+            'Guest Reassigned',
+            ${`${currentStay.guest_name} moved from room ${currentStay.room_number} to ${roomNumber}`},
+            'room',
+            ${roomNumber},
+            NOW(),
+            NOW()
+        )
+    `)
+
+    return c.json({ success: true, roomNumber })
+})
+
+
 // ========== Assign a specific room to a confirmed reservation ==========
 reservations.post('/:id/assign-room', async (c) => {
     const user = c.get('user')
@@ -104,21 +191,18 @@ reservations.post('/:id/assign-room', async (c) => {
     const { roomNumber } = await c.req.json()
     if (!roomNumber) return c.json({ error: 'roomNumber required' }, 400)
     
-    // Fetch reservation
     const reservation = await getReservationById(id)
     if (!reservation) return c.json({ error: 'Reservation not found' }, 404)
     if (reservation.status !== 'confirmed') {
         return c.json({ error: 'Only confirmed reservations can be assigned a room' }, 400)
     }
     
-    // Check room exists and not out of order
     const roomCheck = await db.execute(sql`
         SELECT room_number, out_of_order FROM rooms WHERE room_number = ${roomNumber} AND tenant_id = ${user.tenantId}
     `)
     if (roomCheck.rows.length === 0) return c.json({ error: 'Room not found' }, 404)
     if (roomCheck.rows[0].out_of_order) return c.json({ error: 'Room is out of order' }, 400)
     
-    // Check for overlapping stays
     const overlap = await db.execute(sql`
         SELECT id FROM stays
         WHERE room_number = ${roomNumber}
@@ -131,7 +215,6 @@ reservations.post('/:id/assign-room', async (c) => {
         return c.json({ error: 'Room already booked for those dates' }, 409)
     }
     
-    // Upsert stay record
     const existingStay = await db.execute(sql`
         SELECT id FROM stays WHERE reservation_id = ${id}
     `)
@@ -148,6 +231,23 @@ reservations.post('/:id/assign-room', async (c) => {
             VALUES (${id}, ${reservation.guest_name}, ${reservation.guest_email}, ${roomNumber}, ${reservation.arrival_date}, ${reservation.departure_date}, 'upcoming', NOW(), NOW())
         `)
     }
+
+    // ✨ Notify housekeeping about room assignment
+    await db.execute(sql`
+        INSERT INTO notifications (id, tenant_id, staff_id, type, title, message, reference_type, reference_id, created_at, updated_at)
+        VALUES (
+            gen_random_uuid(),
+            ${user.tenantId},
+            NULL,
+            'room_assigned',
+            'Room Assigned',
+            ${`Room ${roomNumber} assigned to ${reservation.guest_name}`},
+            'room',
+            ${roomNumber},
+            NOW(),
+            NOW()
+        )
+    `)
     
     return c.json({ success: true, roomNumber })
 })
@@ -172,7 +272,7 @@ reservations.post('/check-conflicts', async (c) => {
         parsed.data.arrival_date,
         parsed.data.departure_date,
         parsed.data.room_type,
-        user.tenantId,                    // ✅ pass tenantId
+        user.tenantId,
         parsed.data.exclude_id
     )
     return c.json({ hasConflict })
@@ -204,7 +304,7 @@ reservations.post('/', async (c) => {
         parsed.data.arrival_date,
         parsed.data.departure_date,
         parsed.data.room_type,
-        user.tenantId                    // ✅ pass tenantId
+        user.tenantId
     )
     if (hasConflict) {
         return c.json({ error: 'All rooms of this type are booked for these dates', conflict: true }, 409)

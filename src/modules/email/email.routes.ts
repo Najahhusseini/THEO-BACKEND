@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import { db } from '../../db'
+import { sql } from 'drizzle-orm'
 import { getEmails, updateEmailParsedData, markEmailProcessed, storeEmail } from './email.service'
 import { z } from 'zod'
 
@@ -46,7 +48,28 @@ emailRouter.post('/:id/process', async (c) => {
     }
     const { id } = c.req.param()
     const { createReservation, reservationData } = await c.req.json()
+
     const result = await markEmailProcessed(id, createReservation, reservationData)
+
+    // ✨ Create notification for reservation manager when a reservation is created
+    if (createReservation && result && result.id) {
+        await db.execute(sql`
+            INSERT INTO notifications (id, tenant_id, staff_id, type, title, message, reference_type, reference_id, created_at, updated_at)
+            VALUES (
+                gen_random_uuid(),
+                ${user.tenantId},
+                NULL,
+                'new_reservation',
+                'New Email Reservation',
+                ${`Reservation for ${result.guest_name || 'guest'} created from email`},
+                'reservation',
+                ${result.id},
+                NOW(),
+                NOW()
+            )
+        `)
+    }
+
     return c.json(result)
 })
 
