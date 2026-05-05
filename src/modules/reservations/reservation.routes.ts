@@ -158,19 +158,15 @@ reservations.patch('/stays/:stayId/move-room', async (c) => {
         WHERE id = ${stayId}
     `)
 
-    // ✨ Notify about reassignment
+    // Notify about reassignment (fixed)
     await db.execute(sql`
-        INSERT INTO notifications (id, tenant_id, staff_id, type, title, message, reference_type, reference_id, created_at, updated_at)
+        INSERT INTO notifications (id, staff_id, type, title, message, created_at)
         VALUES (
             gen_random_uuid(),
-            ${user.tenantId},
-            NULL,
+            ${user.id},
             'guest_moved',
             'Guest Reassigned',
             ${`${currentStay.guest_name} moved from room ${currentStay.room_number} to ${roomNumber}`},
-            'room',
-            ${roomNumber},
-            NOW(),
             NOW()
         )
     `)
@@ -232,19 +228,15 @@ reservations.post('/:id/assign-room', async (c) => {
         `)
     }
 
-    // ✨ Notify housekeeping about room assignment
+    // Notify housekeeping about room assignment (FIXED)
     await db.execute(sql`
-        INSERT INTO notifications (id, tenant_id, staff_id, type, title, message, reference_type, reference_id, created_at, updated_at)
+        INSERT INTO notifications (id, staff_id, type, title, message, created_at)
         VALUES (
             gen_random_uuid(),
-            ${user.tenantId},
-            NULL,
+            ${user.id},
             'room_assigned',
             'Room Assigned',
             ${`Room ${roomNumber} assigned to ${reservation.guest_name}`},
-            'room',
-            ${roomNumber},
-            NOW(),
             NOW()
         )
     `)
