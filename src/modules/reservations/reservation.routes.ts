@@ -270,7 +270,7 @@ reservations.post('/check-conflicts', async (c) => {
     return c.json({ hasConflict })
 })
 
-// ========== Create a new reservation ==========
+// ========== Create a new reservation (no room validation / conflict check) ==========
 reservations.post('/', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
@@ -282,7 +282,7 @@ reservations.post('/', async (c) => {
         guest_phone: z.string().optional(),
         arrival_date: z.string().transform(d => new Date(d)),
         departure_date: z.string().transform(d => new Date(d)),
-        room_type: z.string().min(1),
+        room_type: z.string().optional().default('Standard'),    // ← optional, default to Standard
         number_of_guests: z.number().min(1).default(1),
         number_of_rooms: z.number().min(1).default(1),
         special_requests: z.string().optional(),
@@ -292,15 +292,9 @@ reservations.post('/', async (c) => {
     if (!parsed.success) {
         return c.json({ error: 'Invalid request', details: parsed.error }, 400)
     }
-    const hasConflict = await checkConflicts(
-        parsed.data.arrival_date,
-        parsed.data.departure_date,
-        parsed.data.room_type,
-        user.tenantId
-    )
-    if (hasConflict) {
-        return c.json({ error: 'All rooms of this type are booked for these dates', conflict: true }, 409)
-    }
+
+    // ❌ Conflict check removed – rooms are assigned later via Today's Arrivals
+
     try {
         const reservation = await createReservation({
             ...parsed.data,
