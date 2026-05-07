@@ -12,6 +12,7 @@ import {
     sendPreArrivalEmails
 } from './reservation.service'
 import { z } from 'zod'
+import { eventBus } from '../../events/eventBus'
 
 const reservations = new Hono()
 
@@ -73,7 +74,7 @@ reservations.post('/send-prearrival-emails', async (c) => {
     }
 })
 
-// ========== Get all stays (for upcoming guest info) ==========
+// ========== Get all stays ==========
 reservations.get('/stays', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
@@ -111,7 +112,18 @@ reservations.post('/stays/:stayId/check-in', async (c) => {
         if (result.rows.length === 0) {
             return c.json({ error: 'Stay not found' }, 404)
         }
-        return c.json(result.rows[0])
+        const stay = result.rows[0]
+
+        eventBus.emit(user.tenantId, 'guest.checked_in', {
+            tenantId: user.tenantId,
+            stayId: stay.id,
+            reservationId: stay.reservation_id,
+            guestName: stay.guest_name,
+            roomNumber: stay.room_number,
+            staffId: user.id || user.staffId,
+        })
+
+        return c.json(stay)
     } catch (err: any) {
         console.error('Check‑in error:', err)
         return c.json({ error: err.message }, 500)
@@ -122,7 +134,7 @@ reservations.post('/stays/:stayId/check-in', async (c) => {
 reservations.patch('/stays/:stayId/move-room', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
-    if (!['admin', 'manager', 'head_housekeeping'].includes(user.role)) {
+    if (!['admin', 'manager', 'head_housekeeping', 'reservation_manager', 'frontdesk'].includes(user.role)) {
         return c.json({ error: 'Forbidden' }, 403)
     }
 
@@ -158,28 +170,24 @@ reservations.patch('/stays/:stayId/move-room', async (c) => {
         WHERE id = ${stayId}
     `)
 
-    // Notify about reassignment (fixed)
-    await db.execute(sql`
-        INSERT INTO notifications (id, staff_id, type, title, message, created_at)
-        VALUES (
-            gen_random_uuid(),
-            ${user.id},
-            'guest_moved',
-            'Guest Reassigned',
-            ${`${currentStay.guest_name} moved from room ${currentStay.room_number} to ${roomNumber}`},
-            NOW()
-        )
-    `)
+    eventBus.emit(user.tenantId, 'room.reassigned', {
+        tenantId: user.tenantId,
+        stayId,
+        reservationId: currentStay.reservation_id,
+        guestName: currentStay.guest_name,
+        previousRoom: currentStay.room_number,
+        newRoom: roomNumber,
+        staffId: user.id || user.staffId,
+    })
 
     return c.json({ success: true, roomNumber })
 })
-
 
 // ========== Assign a specific room to a confirmed reservation ==========
 reservations.post('/:id/assign-room', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
-    if (!['admin', 'manager', 'reservation_manager'].includes(user.role)) {
+    if (!['admin', 'manager', 'reservation_manager', 'frontdesk'].includes(user.role)) {
         return c.json({ error: 'Forbidden' }, 403)
     }
     
@@ -228,18 +236,13 @@ reservations.post('/:id/assign-room', async (c) => {
         `)
     }
 
-    // Notify housekeeping about room assignment (FIXED)
-    await db.execute(sql`
-        INSERT INTO notifications (id, staff_id, type, title, message, created_at)
-        VALUES (
-            gen_random_uuid(),
-            ${user.id},
-            'room_assigned',
-            'Room Assigned',
-            ${`Room ${roomNumber} assigned to ${reservation.guest_name}`},
-            NOW()
-        )
-    `)
+    eventBus.emit(user.tenantId, 'room.assigned', {
+        tenantId: user.tenantId,
+        reservationId: id,
+        roomNumber,
+        guestName: reservation.guest_name,
+        staffId: user.id || user.staffId,
+    })
     
     return c.json({ success: true, roomNumber })
 })
@@ -270,7 +273,7 @@ reservations.post('/check-conflicts', async (c) => {
     return c.json({ hasConflict })
 })
 
-// ========== Create a new reservation (no room validation / conflict check) ==========
+// ========== Create a new reservation ==========
 reservations.post('/', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
@@ -282,7 +285,7 @@ reservations.post('/', async (c) => {
         guest_phone: z.string().optional(),
         arrival_date: z.string().transform(d => new Date(d)),
         departure_date: z.string().transform(d => new Date(d)),
-        room_type: z.string().optional().default('Standard'),    // ← optional, default to Standard
+        room_type: z.string().nullable().optional(),   // ✅ no default, allows null
         number_of_guests: z.number().min(1).default(1),
         number_of_rooms: z.number().min(1).default(1),
         special_requests: z.string().optional(),
@@ -293,13 +296,25 @@ reservations.post('/', async (c) => {
         return c.json({ error: 'Invalid request', details: parsed.error }, 400)
     }
 
-    // ❌ Conflict check removed – rooms are assigned later via Today's Arrivals
-
     try {
         const reservation = await createReservation({
             ...parsed.data,
             status: parsed.data.status
         })
+
+        eventBus.emit(user.tenantId, 'reservation.created', {
+            tenantId: user.tenantId,
+            reservation,
+            staffId: user.id || user.staffId,
+        })
+        if (reservation.status === 'confirmed') {
+            eventBus.emit(user.tenantId, 'reservation.confirmed', {
+                tenantId: user.tenantId,
+                reservation,
+                staffId: user.id || user.staffId,
+            })
+        }
+
         return c.json(reservation, 201)
     } catch (err: any) {
         console.error('Create error:', err)
@@ -307,7 +322,7 @@ reservations.post('/', async (c) => {
     }
 })
 
-// ========== Get all reservations (filtered) ==========
+// ========== Get all reservations ==========
 reservations.get('/', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
@@ -330,7 +345,7 @@ reservations.get('/', async (c) => {
     }
 })
 
-// ========== Get a single reservation by ID ==========
+// ========== Get a single reservation ==========
 reservations.get('/:id', async (c) => {
     const user = c.get('user')
     if (!user) return c.json({ error: 'Unauthorized' }, 401)
@@ -368,6 +383,11 @@ reservations.put('/:id', async (c) => {
         if (!updated) {
             return c.json({ error: 'Reservation not found' }, 404)
         }
+        eventBus.emit(user.tenantId, 'reservation.updated', {
+            tenantId: user.tenantId,
+            reservation: updated,
+            staffId: user.id || user.staffId,
+        })
         return c.json(updated)
     } catch (err: any) {
         console.error('Update error:', err)
@@ -387,6 +407,11 @@ reservations.post('/:id/confirm', async (c) => {
     }
     try {
         const confirmed = await confirmReservation(id)
+        eventBus.emit(user.tenantId, 'reservation.confirmed', {
+            tenantId: user.tenantId,
+            reservation: confirmed,
+            staffId: user.id || user.staffId,
+        })
         return c.json(confirmed)
     } catch (err: any) {
         console.error('Confirm error:', err)
@@ -406,6 +431,11 @@ reservations.post('/:id/cancel', async (c) => {
     }
     try {
         const cancelled = await cancelReservation(id)
+        eventBus.emit(user.tenantId, 'reservation.cancelled', {
+            tenantId: user.tenantId,
+            reservation: cancelled,
+            staffId: user.id || user.staffId,
+        })
         return c.json(cancelled)
     } catch (err: any) {
         console.error('Cancel error:', err)

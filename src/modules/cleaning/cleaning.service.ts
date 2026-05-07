@@ -1,23 +1,9 @@
 import { db } from '../../db'
 import { sql } from 'drizzle-orm'
-import { sendNotificationToTenant } from '../notifications/notification.service'
 import { createTask } from '../tasks/tasks.service'
+import { eventBus } from '../../events/eventBus'
 
-// Helper: Send in-app notification to all housekeeping staff (including head)
-async function notifyAllHousekeepingStaff(tenantId: string, title: string, message: string, type: string, data?: any) {
-    const staffList = await db.execute(sql`
-        SELECT id FROM staff
-        WHERE tenant_id = ${tenantId}
-          AND role IN ('housekeeping', 'head_housekeeping')
-          AND active = true
-    `);
-    for (const staff of staffList.rows) {
-        await db.execute(sql`
-            INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-            VALUES (${staff.id}, ${title}, ${message}, ${type}, ${JSON.stringify(data || {})}, false)
-        `);
-    }
-}
+// Helper: no longer needed – we use events
 
 // ============ GET DATA ============
 
@@ -68,7 +54,6 @@ export async function getRoomsWithCleaning(tenantId: string) {
             cr.duration_seconds,
             assigned.name as assigned_to_name,
             assigned.role as assigned_to_role,
-            -- Determine request type based on guest presence for dirty rooms
             CASE 
                 WHEN cr.request_type IS NOT NULL THEN cr.request_type
                 WHEN ab.room_id IS NOT NULL THEN 'stay_over'
@@ -213,7 +198,6 @@ export async function ensureCleaningRequestsForDirtyRooms(tenantId: string) {
         
         return { created: result.rows.length };
     } catch (error: any) {
-        // If error is about duplicate requests, that's fine - they already exist
         if (error.message?.includes('already exists') || error.code === 'P0001') {
             console.log('Cleaning requests already exist for dirty rooms');
             return { created: 0, message: 'Requests already exist' };
@@ -223,7 +207,7 @@ export async function ensureCleaningRequestsForDirtyRooms(tenantId: string) {
     }
 }
 
-// ============ ASSIGN CLEANING (FIXED - Updates rooms.assigned_cleaner_id) ============
+// ============ ASSIGN CLEANING ============
 
 export async function assignCleaning(requestId: string, assignedTo: string) {
     const reqCheck = await db.execute(sql`
@@ -240,6 +224,7 @@ export async function assignCleaning(requestId: string, assignedTo: string) {
     const roomId = reqCheck.rows[0].room_id
     const tenantId = reqCheck.rows[0].tenant_id
     const roomNumber = reqCheck.rows[0].room_number
+    const requestType = reqCheck.rows[0].request_type
 
     // Update cleaning request
     await db.execute(sql`
@@ -250,37 +235,22 @@ export async function assignCleaning(requestId: string, assignedTo: string) {
         WHERE id = ${requestId}
     `)
 
-    // CRITICAL FIX: Update rooms table with assigned cleaner
+    // Update rooms table with assigned cleaner
     await db.execute(sql`
         UPDATE rooms 
         SET assigned_cleaner_id = ${assignedTo}
         WHERE id = ${roomId}
     `)
 
-    // Get assigned staff name for notification
-    const staffInfo = await db.execute(sql`
-        SELECT name FROM staff WHERE id = ${assignedTo}
-    `)
-    const staffName = staffInfo.rows[0]?.name || 'staff member'
-
-    // Send notification to assigned cleaner
-    await db.execute(sql`
-        INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-        VALUES (${assignedTo}, '🧹 New Room Assignment', ${`You have been assigned to clean Room ${roomNumber}.`}, 'cleaning', ${JSON.stringify({ requestId, roomId, roomNumber })}, false)
-    `)
-
-    // Also send push notification if available
-    try {
-        await sendNotificationToTenant(
-            tenantId,
-            '🧹 New Cleaning Assignment',
-            `${staffName} has been assigned to clean Room ${roomNumber}`,
-            '/cleaning-icon.png',
-            '/dashboard?tab=staff-rooms'
-        );
-    } catch (err) {
-        console.error('Push notification failed:', err)
-    }
+    // Emit event for cleaning request assignment (notifications handled by listener)
+    eventBus.emit(tenantId, 'cleaning.assigned', {
+        tenantId,
+        roomId,
+        roomNumber,
+        requestId,
+        requestType,
+        assignedTo,
+    })
 
     const updated = await db.execute(sql`
         SELECT 
@@ -328,6 +298,9 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
         await db.execute(sql`
             UPDATE rooms SET cleaning_status = 'cleaning' WHERE id = ${roomId}
         `);
+        eventBus.emit(tenantId, 'room.status_changed', {
+            tenantId, roomId, roomNumber, oldStatus: currentStatus, newStatus: 'cleaning', staffId
+        });
     } else if (status === 'completed') {
         if (currentStatus !== 'in_progress') throw new Error('Task not in progress');
         const startedAt = task.rows[0].started_at;
@@ -349,7 +322,12 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
             UPDATE rooms SET cleaning_status = 'ready' WHERE id = ${roomId}
         `);
         
-        // Create inspection task for head
+        // Emit cleaning completed (listener will notify head housekeeping, front desk)
+        eventBus.emit(tenantId, 'cleaning.completed', {
+            tenantId, roomId, roomNumber, requestId, staffId
+        });
+
+        // Create inspection task for head (still necessary)
         const head = await db.execute(sql`
             SELECT id FROM staff 
             WHERE tenant_id = ${tenantId}
@@ -365,10 +343,7 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
                 head.rows[0].id,
                 'medium'
             );
-            await db.execute(sql`
-                INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-                VALUES (${head.rows[0].id}, 'Room Ready for Inspection', ${`Room ${roomNumber} is now ready for your inspection.`}, 'inspection', ${JSON.stringify({ roomId, roomNumber })}, false)
-            `);
+            // We could emit an event for inspection needed, but for now keep direct task creation
         }
     } else {
         throw new Error('Invalid status');
@@ -405,8 +380,10 @@ export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: s
     `)
     if (currentRoom.rows.length === 0) throw new Error('Room not found')
     const previousStatus = currentRoom.rows[0].cleaning_status
+    const roomNumber = currentRoom.rows[0].room_number
+    const tenantId = currentRoom.rows[0].tenant_id
 
-    const result = await db.execute(sql`
+    await db.execute(sql`
         UPDATE rooms 
         SET cleaning_status = ${cleaningStatus},
             last_cleaning_update = NOW(),
@@ -414,6 +391,10 @@ export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: s
         WHERE id = ${roomId}
         RETURNING *
     `)
+
+    eventBus.emit(tenantId, 'room.status_changed', {
+        tenantId, roomId, roomNumber, oldStatus: previousStatus, newStatus: cleaningStatus, staffId
+    })
 
     if (cleaningStatus === 'dirty' && previousStatus !== 'dirty') {
         try {
@@ -440,22 +421,20 @@ export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: s
                 `);
             }
 
-            const roomNumber = currentRoom.rows[0].room_number;
-            const tenantId = currentRoom.rows[0].tenant_id;
-            const typeLabel = requestType === 'stay_over' ? 'In‑House (Stay‑Over)' : 'Checkout';
-            await notifyAllHousekeepingStaff(
+            // Emit cleaning requested event
+            eventBus.emit(tenantId, 'cleaning.requested', {
                 tenantId,
-                `🧹 Room ${roomNumber} Needs Cleaning`,
-                `Room ${roomNumber} is now dirty and requires ${typeLabel} cleaning.`,
-                'cleaning',
-                { roomId, roomNumber, requestType }
-            );
+                roomId,
+                roomNumber,
+                requestType,
+                staffId,
+            });
         } catch (err) {
-            console.error('Failed to auto-create cleaning request or notify staff:', err);
+            console.error('Failed to auto-create cleaning request or emit event:', err);
         }
     }
 
-    return result.rows[0]
+    return { success: true }
 }
 
 // ============ COMPLETE CLEANING (for staff from other UI) ============
@@ -471,6 +450,8 @@ export async function completeCleaning(requestId: string, completedBy: string) {
         SELECT cleaning_status, room_number, tenant_id FROM rooms WHERE id = ${roomId}
     `)
     if (currentRoom.rows.length === 0) throw new Error('Room not found')
+    const roomNumber = currentRoom.rows[0].room_number
+    const tenantId = currentRoom.rows[0].tenant_id
 
     await db.execute(sql`
         UPDATE cleaning_requests 
@@ -478,12 +459,15 @@ export async function completeCleaning(requestId: string, completedBy: string) {
         WHERE id = ${requestId}
     `)
     
-    // Update room status to ready if not already
     if (currentRoom.rows[0].cleaning_status !== 'ready' && currentRoom.rows[0].cleaning_status !== 'inspected') {
         await db.execute(sql`
             UPDATE rooms SET cleaning_status = 'ready' WHERE id = ${roomId}
         `)
     }
+
+    eventBus.emit(tenantId, 'cleaning.completed', {
+        tenantId, roomId, roomNumber, requestId, staffId: completedBy
+    })
 
     return { success: true }
 }
@@ -531,37 +515,34 @@ export async function getDailyStats(tenantId: string) {
     return result.rows[0];
 }
 
-// ============ RELEASE ROOM (cleaner gives up assignment) ============
+// ============ RELEASE ROOM ============
 
 export async function releaseRoom(roomId: string, staffId: string) {
-    // Verify this cleaner is assigned to this room
     const roomCheck = await db.execute(sql`
-        SELECT assigned_cleaner_id, room_number FROM rooms WHERE id = ${roomId}
+        SELECT assigned_cleaner_id, room_number, tenant_id FROM rooms WHERE id = ${roomId}
     `)
     if (roomCheck.rows.length === 0) throw new Error('Room not found')
     if (roomCheck.rows[0].assigned_cleaner_id !== staffId) {
         throw new Error('You are not assigned to this room')
     }
 
-    // Clear assignment from room
     await db.execute(sql`
         UPDATE rooms SET assigned_cleaner_id = NULL WHERE id = ${roomId}
     `)
 
-    // Update cleaning request back to pending
     await db.execute(sql`
         UPDATE cleaning_requests 
         SET assigned_to = NULL, status = 'pending'
         WHERE room_id = ${roomId} AND status IN ('assigned', 'in_progress')
     `)
 
+    // Optionally emit event (not strictly necessary)
     return { success: true }
 }
 
-// ============ REASSIGN ROOM (head of housekeeping) ============
+// ============ REASSIGN ROOM ============
 
 export async function reassignRoom(roomId: string, newStaffId: string, reassignedBy: string) {
-    // Verify new staff exists and is housekeeping
     const newStaff = await db.execute(sql`
         SELECT id, role, name FROM staff WHERE id = ${newStaffId} AND active = true
     `)
@@ -570,7 +551,6 @@ export async function reassignRoom(roomId: string, newStaffId: string, reassigne
         throw new Error('Can only reassign to housekeeping staff')
     }
 
-    // Get room info
     const roomInfo = await db.execute(sql`
         SELECT room_number, tenant_id FROM rooms WHERE id = ${roomId}
     `)
@@ -578,23 +558,24 @@ export async function reassignRoom(roomId: string, newStaffId: string, reassigne
     const roomNumber = roomInfo.rows[0].room_number
     const tenantId = roomInfo.rows[0].tenant_id
 
-    // Update room assignment
     await db.execute(sql`
         UPDATE rooms SET assigned_cleaner_id = ${newStaffId} WHERE id = ${roomId}
     `)
 
-    // Update cleaning request
     await db.execute(sql`
         UPDATE cleaning_requests 
         SET assigned_to = ${newStaffId}, status = 'assigned'
         WHERE room_id = ${roomId} AND status IN ('pending', 'assigned', 'in_progress')
     `)
 
-    // Notify new cleaner
-    await db.execute(sql`
-        INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-        VALUES (${newStaffId}, '🔄 Room Reassigned', ${`Room ${roomNumber} has been reassigned to you.`}, 'cleaning', ${JSON.stringify({ roomId, roomNumber })}, false)
-    `)
+    // Emit event for reassignment
+    eventBus.emit(tenantId, 'cleaning.reassigned', {
+        tenantId,
+        roomId,
+        roomNumber,
+        newStaffId,
+        reassignedBy,
+    })
 
     return { success: true }
 }
@@ -606,7 +587,6 @@ export async function setRoomOutOfOrder(
   reason: string, 
   setByStaffId: string
 ) {
-  // Verify staff has permission (head_housekeeping or admin)
   const staffCheck = await db.execute(sql`
     SELECT role FROM staff WHERE id = ${setByStaffId}
   `)
@@ -617,7 +597,6 @@ export async function setRoomOutOfOrder(
     throw new Error('Only Head of Housekeeping, Admin, or Manager can mark rooms out of order')
   }
 
-  // Get room info
   const roomInfo = await db.execute(sql`
     SELECT room_number, tenant_id FROM rooms WHERE id = ${roomId}
   `)
@@ -625,7 +604,6 @@ export async function setRoomOutOfOrder(
   const roomNumber = roomInfo.rows[0].room_number
   const tenantId = roomInfo.rows[0].tenant_id
 
-  // Update room to out of order
   await db.execute(sql`
     UPDATE rooms 
     SET out_of_order = true,
@@ -636,7 +614,6 @@ export async function setRoomOutOfOrder(
     WHERE id = ${roomId}
   `)
 
-  // Cancel any pending cleaning requests
   await db.execute(sql`
     UPDATE cleaning_requests 
     SET status = 'cancelled', 
@@ -644,18 +621,18 @@ export async function setRoomOutOfOrder(
     WHERE room_id = ${roomId} AND status IN ('pending', 'assigned', 'in_progress')
   `)
 
-  // Clear assigned cleaner
   await db.execute(sql`
     UPDATE rooms SET assigned_cleaner_id = NULL WHERE id = ${roomId}
   `)
 
-  // Notify all housekeeping staff
-  await db.execute(sql`
-    INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-    SELECT id, '🚫 Room Out of Order', ${`Room ${roomNumber} has been marked OUT OF ORDER. Reason: ${reason}`}, 'alert', ${JSON.stringify({ roomId, roomNumber, reason })}, false
-    FROM staff
-    WHERE tenant_id = ${tenantId} AND role IN ('housekeeping', 'head_housekeeping', 'admin', 'manager') AND active = true
-  `)
+  // Emit event instead of direct notification inserts
+  eventBus.emit(tenantId, 'room.out_of_order', {
+    tenantId,
+    roomId,
+    roomNumber,
+    reason,
+    staffId: setByStaffId,
+  })
 
   return { success: true, roomId, outOfOrder: true, reason }
 }
@@ -664,7 +641,6 @@ export async function removeRoomOutOfOrder(
   roomId: string, 
   removedByStaffId: string
 ) {
-  // Verify staff has permission
   const staffCheck = await db.execute(sql`
     SELECT role FROM staff WHERE id = ${removedByStaffId}
   `)
@@ -675,7 +651,6 @@ export async function removeRoomOutOfOrder(
     throw new Error('Only Head of Housekeeping, Admin, or Manager can remove out of order status')
   }
 
-  // Get room info
   const roomInfo = await db.execute(sql`
     SELECT room_number, tenant_id FROM rooms WHERE id = ${roomId}
   `)
@@ -683,7 +658,6 @@ export async function removeRoomOutOfOrder(
   const roomNumber = roomInfo.rows[0].room_number
   const tenantId = roomInfo.rows[0].tenant_id
 
-  // Update room to available
   await db.execute(sql`
     UPDATE rooms 
     SET out_of_order = false,
@@ -694,19 +668,17 @@ export async function removeRoomOutOfOrder(
     WHERE id = ${roomId}
   `)
 
-  // Auto-create cleaning request
   await db.execute(sql`
     INSERT INTO cleaning_requests (room_id, requested_by, request_type, notes, status)
     VALUES (${roomId}, ${removedByStaffId}, 'checkout', 'Room back in service - needs cleaning', 'pending')
   `)
 
-  // Notify all housekeeping staff
-  await db.execute(sql`
-    INSERT INTO notifications (staff_id, title, message, type, data, is_read)
-    SELECT id, '✅ Room Back in Service', ${`Room ${roomNumber} is now back IN SERVICE and needs cleaning.`}, 'info', ${JSON.stringify({ roomId, roomNumber })}, false
-    FROM staff
-    WHERE tenant_id = ${tenantId} AND role IN ('housekeeping', 'head_housekeeping', 'admin', 'manager') AND active = true
-  `)
+  eventBus.emit(tenantId, 'room.back_in_service', {
+    tenantId,
+    roomId,
+    roomNumber,
+    staffId: removedByStaffId,
+  })
 
   return { success: true, roomId, outOfOrder: false }
 }

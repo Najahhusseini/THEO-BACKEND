@@ -12,8 +12,11 @@ import tasks from './modules/tasks/tasks.routes'
 import supplies from './modules/supplies/supplies.routes'
 import notifications from './modules/notifications/notifications.routes'
 import reservations from './modules/reservations/reservation.routes'
-import emailRouter from './modules/email/email.routes'   // ADD THIS
+import emailRouter from './modules/email/email.routes'
+import superAdmin from './modules/super-admin/super-admin.routes'
 import { authMiddleware } from './middleware/auth'
+import { errorHandler } from './middleware/errorHandler'
+import { registerListeners } from './events/listeners'   // ✅ NEW
 import 'dotenv/config'
 
 const app = new Hono()
@@ -27,6 +30,7 @@ app.use('*', cors({
     allowHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use('*', secureHeaders())
+app.use('*', errorHandler)
 
 // Health check
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }))
@@ -56,16 +60,22 @@ app.route('/api/tasks', tasks)
 app.use('/api/supplies/*', authMiddleware)
 app.route('/api/supplies', supplies)
 
-// ========== RESERVATIONS: Protect all except public-test ==========
+app.use('/api/super-admin/*', authMiddleware)
+app.route('/api/super-admin', superAdmin)
+
+// Reservations: protect all except public-test
 app.use('/api/reservations/*', async (c, next) => {
     if (c.req.path === '/public-test') return next()
     return authMiddleware(c, next)
 })
 app.route('/api/reservations', reservations)
 
-// ========== EMAIL INGESTION ROUTES ==========
+// Email ingestion routes
 app.use('/api/emails/*', authMiddleware)
 app.route('/api/emails', emailRouter)
+
+// ✅ Register cross-module event listeners
+registerListeners()
 
 // API home
 app.get('/api', (c) => c.json({ message: 'THEO Mini API v1' }))

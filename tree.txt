@@ -1,0 +1,60 @@
+Folder PATH listing for volume OS
+Volume serial number is 2AA7-D568
+C:\USERS\NAJAH\DESKTOP\THEO-BACKEND\SRC
+¦   index.ts
+¦   
++---db
+¦       index.ts
+¦       migrate.ts
+¦       schema.ts
+¦       seed.ts
+¦       
++---middleware
+¦       auth.ts
+¦       
++---modules
+¦   +---attendance
+¦   ¦       attendance.routes.ts
+¦   ¦       attendance.service.ts
+¦   ¦       
+¦   +---auth
+¦   ¦       auth.routes.ts
+¦   ¦       auth.service.ts
+¦   ¦       
+¦   +---cleaning
+¦   ¦       cleaning.routes.ts
+¦   ¦       cleaning.service.ts
+¦   ¦       
+¦   +---email
+¦   ¦       email.routes.ts
+¦   ¦       email.service.ts
+¦   ¦       
+¦   +---notifications
+¦   ¦       notification.routes.ts
+¦   ¦       notification.service.ts
+¦   ¦       notifications.routes.ts
+¦   ¦       
+¦   +---reservations
+¦   ¦       reservation.routes.ts
+¦   ¦       reservation.service.ts
+¦   ¦       
+¦   +---rooms
+¦   ¦       rooms.routes.ts
+¦   ¦       rooms.service.ts
+¦   ¦       
+¦   +---schedule
+¦   ¦       schedule.routes.ts
+¦   ¦       schedule.service.ts
+¦   ¦       
+¦   +---supplies
+¦   ¦       supplies.routes.ts
+¦   ¦       supplies.service.ts
+¦   ¦       
+¦   +---tasks
+¦           tasks.routes.ts
+¦           tasks.service.ts
+¦           
++---scripts
+¦       reset-data.ts
+¦       
++---websocket

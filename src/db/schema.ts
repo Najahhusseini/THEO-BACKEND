@@ -26,6 +26,7 @@ export const staff = pgTable('staff', {
   phone: text('phone'),
   active: boolean('active').default(true),
   passwordHash: text('password_hash'),
+  isSuperAdmin: boolean('is_super_admin').default(false),   // ✅ NEW
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
@@ -82,5 +83,17 @@ export const attendance = pgTable('attendance', {
   clockIn: timestamp('clock_in').defaultNow().notNull(),
   clockOut: timestamp('clock_out'),
   notes: text('notes'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
+
+// NEW: Audit Logs table
+export const auditLogs = pgTable('audit_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').references(() => tenants.id, { onDelete: 'cascade' }).notNull(),
+  staffId: uuid('staff_id').references(() => staff.id, { onDelete: 'set null' }),
+  action: text('action').notNull(),
+  entity: text('entity').notNull(),
+  entityId: uuid('entity_id').notNull(),
+  details: text('details'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })

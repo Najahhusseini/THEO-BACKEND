@@ -55,6 +55,7 @@ auth.post('/login', async (c) => {
       tenantId: staffMember.tenantId,
       email: staffMember.email,
       role: staffMember.role,
+      isSuperAdmin: staffMember.isSuperAdmin,   // ✅ NEW
     }
 
     const accessToken = generateAccessToken(payload)
@@ -74,6 +75,7 @@ auth.post('/login', async (c) => {
         name: staffMember.name,
         email: staffMember.email,
         role: staffMember.role,
+        isSuperAdmin: staffMember.isSuperAdmin,   // ✅ also returned to frontend
       },
     })
   } catch (error) {
@@ -104,6 +106,7 @@ auth.post('/refresh', async (c) => {
       tenantId: staffMember[0].tenantId,
       email: staffMember[0].email,
       role: staffMember[0].role,
+      isSuperAdmin: staffMember[0].isSuperAdmin,   // ✅ NEW
     })
 
     return c.json({ accessToken: newAccessToken })
@@ -141,9 +144,79 @@ auth.get('/me', async (c) => {
       email: staffMember[0].email,
       role: staffMember[0].role,
       tenantId: staffMember[0].tenantId,
+      isSuperAdmin: staffMember[0].isSuperAdmin,   // ✅ NEW
     })
   } catch (error) {
     console.error('Me endpoint error:', error)
+    return c.json({ error: 'Internal server error' }, 500)
+  }
+})
+
+// ========== Super‑Admin Login (no subdomain needed) ==========
+auth.post('/super-login', async (c) => {
+  try {
+    const { email, password } = await c.req.json()
+
+    if (!email || !password) {
+      return c.json({ error: 'Email and password are required' }, 400)
+    }
+
+    // Find the staff member by email only (could be any tenant)
+    const staffMember = await db.select().from(staff).where(eq(staff.email, email)).limit(1)
+
+    if (!staffMember[0]) {
+      console.log('Super‑admin staff not found:', email)
+      return c.json({ error: 'Invalid credentials' }, 401)
+    }
+
+    if (!staffMember[0].passwordHash) {
+      return c.json({ error: 'No password set' }, 401)
+    }
+
+    const isValid = await comparePassword(password, staffMember[0].passwordHash)
+    if (!isValid) {
+      console.log('Invalid super‑admin password for:', email)
+      return c.json({ error: 'Invalid credentials' }, 401)
+    }
+
+    if (!staffMember[0].active) {
+      return c.json({ error: 'Account deactivated' }, 401)
+    }
+
+    if (!staffMember[0].isSuperAdmin) {
+      return c.json({ error: 'Not a super‑admin account' }, 403)
+    }
+
+    const payload = {
+      staffId: staffMember[0].id,
+      tenantId: staffMember[0].tenantId,
+      email: staffMember[0].email,
+      role: staffMember[0].role,
+      isSuperAdmin: true,
+    }
+
+    const accessToken = generateAccessToken(payload)
+    const refreshToken = generateRefreshToken({
+      staffId: staffMember[0].id,
+      tenantId: staffMember[0].tenantId,
+      email: staffMember[0].email,
+    })
+
+    console.log('Super‑admin login successful for:', staffMember[0].email)
+
+    return c.json({
+      accessToken,
+      refreshToken,
+      staff: {
+        id: staffMember[0].id,
+        name: staffMember[0].name,
+        email: staffMember[0].email,
+        role: staffMember[0].role,
+        isSuperAdmin: true,
+      },
+    })
+  } catch (error) {
+    console.error('Super‑login error:', error)
     return c.json({ error: 'Internal server error' }, 500)
   }
 })

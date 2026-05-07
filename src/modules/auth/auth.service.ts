@@ -14,6 +14,7 @@ export interface TokenPayload {
   tenantId: string
   email: string
   role: string
+  isSuperAdmin: boolean          // ✅ NEW
 }
 
 export function generateAccessToken(payload: TokenPayload): string {

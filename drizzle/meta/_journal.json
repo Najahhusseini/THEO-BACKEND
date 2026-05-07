@@ -15,6 +15,13 @@
       "when": 1777450965182,
       "tag": "0001_slim_thena",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778157055029,
+      "tag": "0002_strange_agent_zero",
+      "breakpoints": true
     }
   ]
 }

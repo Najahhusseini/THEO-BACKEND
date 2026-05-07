@@ -21,7 +21,7 @@ export interface CreateReservationInput {
     source?: string
     arrival_date: Date
     departure_date: Date
-    room_type: string
+    room_type?: string | null          // ✅ now optional, can be null
     number_of_guests?: number
     number_of_rooms?: number
     special_requests?: string
@@ -36,7 +36,7 @@ export interface UpdateReservationInput {
     guest_phone?: string
     arrival_date?: Date
     departure_date?: Date
-    room_type?: string
+    room_type?: string | null
     number_of_guests?: number
     number_of_rooms?: number
     special_requests?: string
@@ -48,6 +48,12 @@ export async function createReservation(data: CreateReservationInput) {
     const now = new Date()
     const status = data.status === 'confirmed' ? 'confirmed' : 'pending_review'
     
+    // Convert empty string to null for room_type
+    let room_type: string | null = null
+    if (data.room_type !== undefined) {
+        room_type = data.room_type?.trim() === '' ? null : data.room_type
+    }
+    
     const result = await db.execute(sql`
         INSERT INTO reservations (
             guest_name, guest_email, guest_phone, source,
@@ -57,7 +63,7 @@ export async function createReservation(data: CreateReservationInput) {
             confirmed_at
         ) VALUES (
             ${data.guest_name}, ${data.guest_email || null}, ${data.guest_phone || null}, ${data.source || 'manual'},
-            ${data.arrival_date}, ${data.departure_date}, ${data.room_type},
+            ${data.arrival_date}, ${data.departure_date}, ${room_type},
             ${data.number_of_guests || 1}, ${data.number_of_rooms || 1}, ${data.special_requests || null},
             ${data.is_group_booking || false}, ${data.group_id || null}, ${status}, NOW(), NOW(),
             ${status === 'confirmed' ? now : null}
@@ -218,7 +224,6 @@ export async function checkConflicts(
     tenantId: string,
     excludeReservationId?: string
 ) {
-    // 1. Count total rooms of this type (excluding out‑of‑order)
     const roomCountResult = await db.execute(sql`
         SELECT COUNT(*)::int as total
         FROM rooms
@@ -228,10 +233,8 @@ export async function checkConflicts(
     `)
     const totalRooms = roomCountResult.rows[0]?.total || 0
 
-    // If no rooms of this type exist, it's a conflict
     if (totalRooms === 0) return true
 
-    // 2. Count overlapping confirmed reservations for this room type
     let overlapQuery = sql`
         SELECT COUNT(*)::int as count
         FROM reservations
@@ -246,7 +249,6 @@ export async function checkConflicts(
     const overlapResult = await db.execute(overlapQuery)
     const overlappingBookings = overlapResult.rows[0]?.count || 0
 
-    // 3. Conflict if booked rooms >= available rooms
     return overlappingBookings >= totalRooms
 }
 
@@ -277,7 +279,7 @@ export async function sendPreArrivalEmails(tenantId: string, daysAhead: number =
                     <p>We look forward to welcoming you on <strong>${new Date(r.arrival_date).toLocaleDateString()}</strong>.</p>
                     <p>Your booking details:</p>
                     <ul>
-                        <li><strong>Room type:</strong> ${r.room_type}</li>
+                        <li><strong>Room type:</strong> ${r.room_type || 'Not specified'}</li>
                         <li><strong>Number of rooms:</strong> ${r.number_of_rooms}</li>
                         <li><strong>Departure:</strong> ${new Date(r.departure_date).toLocaleDateString()}</li>
                     </ul>

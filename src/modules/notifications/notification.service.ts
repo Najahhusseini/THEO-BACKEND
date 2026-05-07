@@ -159,7 +159,7 @@ export async function sendNotificationToRole(
   return { sent: count }
 }
 
-// Send notification to multiple roles
+// ✅ FINAL FIXED: Send notification to ALL staff of MULTIPLE roles
 export async function sendNotificationToRoles(
   tenantId: string,
   roles: string[],
@@ -168,13 +168,17 @@ export async function sendNotificationToRoles(
   type: string = 'info',
   data?: any
 ) {
+  // Build a literal PostgreSQL array: ARRAY['role1','role2']
+  const escapedRoles = roles.map(r => `'${r.replace(/'/g, "''")}'`).join(', ')
+  const roleArray = sql.raw(`ARRAY[${escapedRoles}]::text[]`)
+
   const staffList = await db.execute(sql`
     SELECT id FROM staff
     WHERE tenant_id = ${tenantId}
-      AND role = ANY(${roles})
+      AND role = ANY(${roleArray})
       AND active = true
   `)
-  
+
   let count = 0
   for (const staff of staffList.rows) {
     await db.execute(sql`
@@ -183,33 +187,35 @@ export async function sendNotificationToRoles(
     `)
     count++
   }
-  
+
   return { sent: count }
 }
 
-// Get notifications for a staff member with role-based filtering (FIXED SQL)
+// Get notifications for a staff member with role-based filtering
 export async function getNotificationsForStaff(
   staffId: string,
   role: string,
   limit: number = 20,
   offset: number = 0
 ) {
-  // Role-based filtering - different roles see different notification types
   let roleFilter = ''
   
   switch(role) {
     case 'head_housekeeping':
-      roleFilter = `AND type IN ('cleaning', 'inspection', 'supply', 'alert', 'task', 'room_assigned', 'room_completed')`
+      roleFilter = `AND type IN ('cleaning', 'inspection', 'supply', 'alert', 'task', 'room_assigned', 'room_completed', 'guest_moved', 'room_out_of_order')`
       break
     case 'housekeeping':
-      roleFilter = `AND type IN ('cleaning', 'task', 'room_assigned')`
+      roleFilter = `AND type IN ('cleaning', 'task', 'room_assigned', 'guest_moved', 'inspection')`
       break
     case 'admin':
     case 'manager':
       roleFilter = ``
       break
     case 'frontdesk':
-      roleFilter = `AND type IN ('room_ready', 'room_out_of_order', 'alert', 'info')`
+      roleFilter = `AND type IN ('room_assigned', 'guest_checked_in', 'guest_moved', 'room_ready', 'room_out_of_order', 'alert', 'info')`
+      break
+    case 'reservation_manager':
+      roleFilter = `AND type IN ('reservation_confirmed', 'reservation_cancelled', 'reservation_created', 'room_assigned', 'guest_checked_in', 'info', 'alert')`
       break
     case 'maintenance':
       roleFilter = `AND type IN ('maintenance', 'alert', 'task')`
@@ -218,7 +224,6 @@ export async function getNotificationsForStaff(
       roleFilter = `AND type IN ('info', 'alert')`
   }
   
-  // Fixed SQL - proper parameter placement
   const result = await db.execute(sql`
     SELECT id, title, message, type, is_read, created_at, data
     FROM notifications
@@ -229,23 +234,26 @@ export async function getNotificationsForStaff(
   return result.rows
 }
 
-// Get unread count for a staff member with role-based filtering (FIXED SQL)
+// Get unread count for a staff member with role-based filtering
 export async function getUnreadCountForStaff(staffId: string, role: string): Promise<number> {
   let roleFilter = ''
   
   switch(role) {
     case 'head_housekeeping':
-      roleFilter = `AND type IN ('cleaning', 'inspection', 'supply', 'alert', 'task', 'room_assigned', 'room_completed')`
+      roleFilter = `AND type IN ('cleaning', 'inspection', 'supply', 'alert', 'task', 'room_assigned', 'room_completed', 'guest_moved', 'room_out_of_order')`
       break
     case 'housekeeping':
-      roleFilter = `AND type IN ('cleaning', 'task', 'room_assigned')`
+      roleFilter = `AND type IN ('cleaning', 'task', 'room_assigned', 'guest_moved', 'inspection')`
       break
     case 'admin':
     case 'manager':
       roleFilter = ``
       break
     case 'frontdesk':
-      roleFilter = `AND type IN ('room_ready', 'room_out_of_order', 'alert', 'info')`
+      roleFilter = `AND type IN ('room_assigned', 'guest_checked_in', 'guest_moved', 'room_ready', 'room_out_of_order', 'alert', 'info')`
+      break
+    case 'reservation_manager':
+      roleFilter = `AND type IN ('reservation_confirmed', 'reservation_cancelled', 'reservation_created', 'room_assigned', 'guest_checked_in', 'info', 'alert')`
       break
     case 'maintenance':
       roleFilter = `AND type IN ('maintenance', 'alert', 'task')`
