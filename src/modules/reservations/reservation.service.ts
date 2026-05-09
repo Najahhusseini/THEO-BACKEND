@@ -21,13 +21,14 @@ export interface CreateReservationInput {
     source?: string
     arrival_date: Date
     departure_date: Date
-    room_type?: string | null          // ✅ now optional, can be null
+    room_type?: string | null
     number_of_guests?: number
     number_of_rooms?: number
     special_requests?: string
     is_group_booking?: boolean
     group_id?: string
     status?: 'pending_review' | 'confirmed'
+    tenantId?: string
 }
 
 export interface UpdateReservationInput {
@@ -43,35 +44,80 @@ export interface UpdateReservationInput {
     status?: string
 }
 
+// ================== GUEST MATCHING HELPER ==================
+async function getOrCreateGuest(
+    tenantId: string,
+    name: string,
+    email?: string,
+    phone?: string
+): Promise<string> {
+    // 1. Try to find an existing guest by email (most reliable)
+    if (email) {
+        const existing = await db.execute(sql`
+            SELECT id FROM guests
+            WHERE tenant_id = ${tenantId} AND email = ${email}
+            LIMIT 1
+        `)
+        if (existing.rows.length > 0) {
+            return existing.rows[0].id
+        }
+    }
+
+    // 2. Fallback – match by name if no email
+    const byName = await db.execute(sql`
+        SELECT id FROM guests
+        WHERE tenant_id = ${tenantId} AND name = ${name}
+        LIMIT 1
+    `)
+    if (byName.rows.length > 0) {
+        return byName.rows[0].id
+    }
+
+    // 3. Create a new guest record
+    const insert = await db.execute(sql`
+        INSERT INTO guests (id, tenant_id, name, email, phone)
+        VALUES (gen_random_uuid(), ${tenantId}, ${name}, ${email || null}, ${phone || null})
+        RETURNING id
+    `)
+    return insert.rows[0].id
+}
+
 // ================== CREATE RESERVATION ==================
 export async function createReservation(data: CreateReservationInput) {
     const now = new Date()
     const status = data.status === 'confirmed' ? 'confirmed' : 'pending_review'
-    
+
     // Convert empty string to null for room_type
     let room_type: string | null = null
     if (data.room_type !== undefined) {
         room_type = data.room_type?.trim() === '' ? null : data.room_type
     }
-    
+
+    // ✅ Unify guest – finds or creates a guest record
+    const guestId = data.tenantId
+        ? await getOrCreateGuest(data.tenantId, data.guest_name, data.guest_email, data.guest_phone)
+        : null
+
     const result = await db.execute(sql`
         INSERT INTO reservations (
             guest_name, guest_email, guest_phone, source,
             arrival_date, departure_date, room_type,
             number_of_guests, number_of_rooms, special_requests,
-            is_group_booking, group_id, status, created_at, updated_at,
-            confirmed_at
+            is_group_booking, group_id, status, tenant_id,
+            guest_id, created_at, updated_at, confirmed_at
         ) VALUES (
             ${data.guest_name}, ${data.guest_email || null}, ${data.guest_phone || null}, ${data.source || 'manual'},
             ${data.arrival_date}, ${data.departure_date}, ${room_type},
             ${data.number_of_guests || 1}, ${data.number_of_rooms || 1}, ${data.special_requests || null},
-            ${data.is_group_booking || false}, ${data.group_id || null}, ${status}, NOW(), NOW(),
+            ${data.is_group_booking || false}, ${data.group_id || null}, ${status},
+            ${data.tenantId || null}, ${guestId},
+            NOW(), NOW(),
             ${status === 'confirmed' ? now : null}
         )
         RETURNING *
     `)
     const reservation = result.rows[0]
-    
+
     if (status === 'confirmed') {
         await db.execute(sql`
             INSERT INTO stays (
@@ -83,7 +129,7 @@ export async function createReservation(data: CreateReservationInput) {
             )
         `)
     }
-    
+
     return reservation
 }
 
@@ -95,7 +141,7 @@ export async function getReservations(filters?: {
     room_type?: string
 }) {
     let query = sql`SELECT * FROM reservations WHERE 1=1`
-    
+
     if (filters?.status) {
         query = sql`${query} AND status = ${filters.status}`
     }
@@ -108,7 +154,7 @@ export async function getReservations(filters?: {
     if (filters?.room_type) {
         query = sql`${query} AND room_type = ${filters.room_type}`
     }
-    
+
     query = sql`${query} ORDER BY arrival_date ASC`
     const result = await db.execute(query)
     return result.rows
@@ -126,7 +172,7 @@ export async function updateReservation(id: string, data: UpdateReservationInput
     const fields = []
     const values: any[] = []
     let paramIndex = 1
-    
+
     if (data.guest_name !== undefined) {
         fields.push(`guest_name = $${paramIndex++}`)
         values.push(data.guest_name)
@@ -167,10 +213,10 @@ export async function updateReservation(id: string, data: UpdateReservationInput
         fields.push(`status = $${paramIndex++}`)
         values.push(data.status)
     }
-    
+
     fields.push(`updated_at = NOW()`)
     values.push(id)
-    
+
     const result = await db.execute(sql`
         UPDATE reservations 
         SET ${sql.raw(fields.join(', '))}
@@ -184,14 +230,14 @@ export async function updateReservation(id: string, data: UpdateReservationInput
 export async function confirmReservation(id: string) {
     const reservation = await getReservationById(id)
     if (!reservation) throw new Error('Reservation not found')
-    
+
     const updated = await db.execute(sql`
         UPDATE reservations 
         SET status = 'confirmed', confirmed_at = NOW(), updated_at = NOW()
         WHERE id = ${id}
         RETURNING *
     `)
-    
+
     await db.execute(sql`
         INSERT INTO stays (
             reservation_id, guest_name, guest_email,
@@ -201,7 +247,7 @@ export async function confirmReservation(id: string) {
             ${reservation.arrival_date}, ${reservation.departure_date}, 'upcoming', NOW(), NOW()
         )
     `)
-    
+
     return updated.rows[0]
 }
 

@@ -12,14 +12,12 @@ export function registerListeners() {
   eventBus.on('*', 'reservation.confirmed', async (payload: any) => {
     const { tenantId, reservation, staffId } = payload
 
-    // Notify relevant roles
     sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'reservation_manager'], 
       '📋 Reservation Confirmed',
       `Reservation for ${reservation.guest_name} confirmed.`,
       'reservation_confirmed'
     ).catch(console.error)
 
-    // Audit
     logAudit({
       tenantId, staffId,
       action: 'reservation.confirmed',
@@ -27,7 +25,6 @@ export function registerListeners() {
       details: { guest: reservation.guest_name }
     }).catch(console.error)
 
-    // Create folio – fetch the stay that was just created by the reservation service
     try {
       const stayResult = await db.execute(sql`
         SELECT id, guest_name FROM stays WHERE reservation_id = ${reservation.id} ORDER BY created_at DESC LIMIT 1
@@ -112,12 +109,9 @@ export function registerListeners() {
       details: { guestName, roomNumber }
     }).catch(console.error)
 
-    // Close the folio
     try {
       await closeFolio(stayId)
       console.log(`Folio closed for stay ${stayId}`)
-
-      // Create immutable financial event packet
       await createFinancialEvent(tenantId, stayId)
       console.log(`Financial event created for stay ${stayId}`)
     } catch (err) {
@@ -196,4 +190,34 @@ export function registerListeners() {
       details: { roomNumber }
     }).catch(console.error)
   })
+
+  // ==================== ATTENDANCE CLOCK‑IN AUTO‑ASSIGN ====================
+
+  eventBus.on('*', 'attendance.clock_in', async (payload: any) => {
+    const { staffId, tenantId, role } = payload;
+    // Only for housekeeping staff
+    if (role !== 'housekeeping' && role !== 'head_housekeeping') return;
+
+    const today = new Date().toISOString().split('T')[0];
+    const scheduled = await db.execute(sql`
+      SELECT id, room_id FROM cleaning_requests 
+      WHERE assigned_to = ${staffId}
+        AND status = 'scheduled'
+        AND DATE(assigned_at) = ${today}
+    `);
+
+    for (const row of scheduled.rows) {
+      await db.execute(sql`
+        UPDATE cleaning_requests SET status = 'assigned' WHERE id = ${row.id}
+      `);
+      // Optionally mark room as assigned in rooms table
+      await db.execute(sql`
+        UPDATE rooms SET assigned_cleaner_id = ${staffId}, cleaning_status = 'dirty' WHERE id = ${row.room_id}
+      `);
+    }
+
+    if (scheduled.rows.length > 0) {
+      console.log(`Auto-assigned ${scheduled.rows.length} rooms to staff ${staffId} on clock-in.`);
+    }
+  });
 }

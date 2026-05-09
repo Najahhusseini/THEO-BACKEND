@@ -3,8 +3,6 @@ import { sql } from 'drizzle-orm'
 import { createTask } from '../tasks/tasks.service'
 import { eventBus } from '../../events/eventBus'
 
-// Helper: no longer needed – we use events
-
 // ============ GET DATA ============
 
 export async function getRoomsWithCleaning(tenantId: string) {
@@ -343,7 +341,6 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
                 head.rows[0].id,
                 'medium'
             );
-            // We could emit an event for inspection needed, but for now keep direct task creation
         }
     } else {
         throw new Error('Invalid status');
@@ -536,7 +533,6 @@ export async function releaseRoom(roomId: string, staffId: string) {
         WHERE room_id = ${roomId} AND status IN ('assigned', 'in_progress')
     `)
 
-    // Optionally emit event (not strictly necessary)
     return { success: true }
 }
 
@@ -568,7 +564,6 @@ export async function reassignRoom(roomId: string, newStaffId: string, reassigne
         WHERE room_id = ${roomId} AND status IN ('pending', 'assigned', 'in_progress')
     `)
 
-    // Emit event for reassignment
     eventBus.emit(tenantId, 'cleaning.reassigned', {
         tenantId,
         roomId,
@@ -625,7 +620,6 @@ export async function setRoomOutOfOrder(
     UPDATE rooms SET assigned_cleaner_id = NULL WHERE id = ${roomId}
   `)
 
-  // Emit event instead of direct notification inserts
   eventBus.emit(tenantId, 'room.out_of_order', {
     tenantId,
     roomId,
@@ -701,4 +695,38 @@ export async function getOutOfOrderRooms(tenantId: string) {
     ORDER BY r.out_of_order_since DESC
   `)
   return result.rows
+}
+
+// ============ SCHEDULE & CLAIM (NEW) ============
+
+// Schedule a room for a specific staff member (status 'scheduled')
+export async function scheduleRoom(roomId: string, staffId: string, shiftDate: string) {
+  await db.execute(sql`
+    INSERT INTO cleaning_requests (room_id, requested_by, request_type, notes, status, assigned_to, assigned_at)
+    VALUES (${roomId}, ${staffId}, 'stay_over', ${`Scheduled for ${shiftDate}`}, 'scheduled', ${staffId}, NOW())
+  `);
+  return { success: true };
+}
+
+// Claim a pending room (no assigned cleaner, status 'pending')
+export async function claimRoom(roomId: string, staffId: string) {
+  const existing = await db.execute(sql`
+    SELECT id FROM cleaning_requests 
+    WHERE room_id = ${roomId} 
+      AND status = 'pending' 
+      AND (assigned_to IS NULL)
+    LIMIT 1
+  `);
+  if (existing.rows.length === 0) {
+    throw new Error('No claimable cleaning request for this room');
+  }
+  await db.execute(sql`
+    UPDATE cleaning_requests 
+    SET assigned_to = ${staffId}, status = 'assigned', assigned_at = NOW()
+    WHERE id = ${existing.rows[0].id}
+  `);
+  await db.execute(sql`
+    UPDATE rooms SET assigned_cleaner_id = ${staffId} WHERE id = ${roomId}
+  `);
+  return { success: true };
 }

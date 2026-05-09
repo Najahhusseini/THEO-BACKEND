@@ -285,7 +285,7 @@ reservations.post('/', async (c) => {
         guest_phone: z.string().optional(),
         arrival_date: z.string().transform(d => new Date(d)),
         departure_date: z.string().transform(d => new Date(d)),
-        room_type: z.string().nullable().optional(),   // ✅ no default, allows null
+        room_type: z.string().nullable().optional(),
         number_of_guests: z.number().min(1).default(1),
         number_of_rooms: z.number().min(1).default(1),
         special_requests: z.string().optional(),
@@ -299,7 +299,8 @@ reservations.post('/', async (c) => {
     try {
         const reservation = await createReservation({
             ...parsed.data,
-            status: parsed.data.status
+            status: parsed.data.status,
+            tenantId: user.tenantId,   // ✅ pass tenant ID
         })
 
         eventBus.emit(user.tenantId, 'reservation.created', {

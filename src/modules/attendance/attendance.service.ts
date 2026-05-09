@@ -1,8 +1,9 @@
 import { db } from '../../db'
 import { sql } from 'drizzle-orm'
+import { eventBus } from '../../events/eventBus'
 
 // Clock in
-export async function clockIn(staffId: string) {
+export async function clockIn(staffId: string, location?: string, deviceInfo?: string) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
   
@@ -20,10 +21,28 @@ export async function clockIn(staffId: string) {
   }
   
   const result = await db.execute(sql`
-    INSERT INTO attendance (staff_id, clock_in) 
-    VALUES (${staffId}, NOW()) 
+    INSERT INTO attendance (staff_id, clock_in, location, device_info) 
+    VALUES (${staffId}, NOW(), ${location || null}, ${deviceInfo || null}) 
     RETURNING *
   `)
+  
+  // Emit event for auto‑assignment
+  try {
+    const staffResult = await db.execute(sql`
+      SELECT id, tenant_id, role FROM staff WHERE id = ${staffId}
+    `)
+    const staff = staffResult.rows[0]
+    if (staff) {
+      eventBus.emit(staff.tenant_id, 'attendance.clock_in', {
+        staffId,
+        tenantId: staff.tenant_id,
+        role: staff.role,
+        timestamp: new Date().toISOString(),
+      })
+    }
+  } catch (err) {
+    console.error('Failed to emit clock_in event:', err)
+  }
   
   return result.rows[0]
 }
@@ -72,7 +91,7 @@ export async function getCurrentStatus(staffId: string) {
   }
 }
 
-// Get today's attendance for a specific staff member (for shift tracker)
+// Get today's attendance for a specific staff member
 export async function getTodayAttendance(staffId: string) {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -151,7 +170,6 @@ export async function getAllStaffTodayAttendance(tenantId: string) {
 
 // Get weekly hours (Monday to Sunday)
 export async function getWeeklyHours(staffId: string) {
-  // PostgreSQL week starts on Monday by default with DATE_TRUNC('week', ...)
   const result = await db.execute(sql`
     SELECT 
       DATE(clock_in) as day,
