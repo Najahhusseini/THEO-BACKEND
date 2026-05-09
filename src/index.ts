@@ -14,6 +14,7 @@ import notifications from './modules/notifications/notifications.routes'
 import reservations from './modules/reservations/reservation.routes'
 import emailRouter from './modules/email/email.routes'
 import superAdmin from './modules/super-admin/super-admin.routes'
+import adminStaff from './modules/admin-staff/admin-staff.routes'
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
 import { registerListeners } from './events/listeners'   // ✅ NEW
@@ -62,6 +63,9 @@ app.route('/api/supplies', supplies)
 
 app.use('/api/super-admin/*', authMiddleware)
 app.route('/api/super-admin', superAdmin)
+
+app.use('/api/admin-staff/*', authMiddleware)
+app.route('/api/admin-staff', adminStaff)
 
 // Reservations: protect all except public-test
 app.use('/api/reservations/*', async (c, next) => {

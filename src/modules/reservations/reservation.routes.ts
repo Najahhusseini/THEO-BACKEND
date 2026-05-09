@@ -443,4 +443,41 @@ reservations.post('/:id/cancel', async (c) => {
     }
 })
 
+// ========== Check‑out a stay ==========
+reservations.post('/stays/:stayId/check-out', async (c) => {
+  const user = c.get('user')
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  if (!['admin', 'manager', 'frontdesk'].includes(user.role)) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+
+  const { stayId } = c.req.param()
+  try {
+    const result = await db.execute(sql`
+      UPDATE stays
+      SET status = 'checked_out', updated_at = NOW()
+      WHERE id = ${stayId} AND status = 'checked_in'
+      RETURNING *
+    `)
+    if (result.rows.length === 0) {
+      return c.json({ error: 'Stay not found or not checked in' }, 404)
+    }
+    const stay = result.rows[0]
+
+    eventBus.emit(user.tenantId, 'guest.checked_out', {
+      tenantId: user.tenantId,
+      stayId: stay.id,
+      reservationId: stay.reservation_id,
+      guestName: stay.guest_name,
+      roomNumber: stay.room_number,
+      staffId: user.id || user.staffId,
+    })
+
+    return c.json(stay)
+  } catch (err: any) {
+    console.error('Check‑out error:', err)
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 export default reservations

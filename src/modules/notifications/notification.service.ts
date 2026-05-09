@@ -168,9 +168,9 @@ export async function sendNotificationToRoles(
   type: string = 'info',
   data?: any
 ) {
-  // Build a literal PostgreSQL array: ARRAY['role1','role2']
+  // Build a literal PostgreSQL array, cast to the correct enum type
   const escapedRoles = roles.map(r => `'${r.replace(/'/g, "''")}'`).join(', ')
-  const roleArray = sql.raw(`ARRAY[${escapedRoles}]::text[]`)
+  const roleArray = sql.raw(`ARRAY[${escapedRoles}]::staff_role[]`)
 
   const staffList = await db.execute(sql`
     SELECT id FROM staff

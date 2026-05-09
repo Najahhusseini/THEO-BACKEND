@@ -1,28 +1,45 @@
 import { eventBus } from './eventBus'
 import { sendNotificationToRoles } from '../modules/notifications/notification.service'
 import { logAudit } from '../audit/audit.service'
+import { db } from '../db'
+import { sql } from 'drizzle-orm'
+import { createFolio, closeFolio, createFinancialEvent } from '../modules/folio/folio.service'
 
-/**
- * Register all cross-module event listeners.
- * Called once at startup.
- */
 export function registerListeners() {
 
   // ==================== RESERVATION EVENTS ====================
 
-  eventBus.on('*', 'reservation.confirmed', (payload: any) => {
+  eventBus.on('*', 'reservation.confirmed', async (payload: any) => {
     const { tenantId, reservation, staffId } = payload
+
+    // Notify relevant roles
     sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'reservation_manager'], 
       '📋 Reservation Confirmed',
       `Reservation for ${reservation.guest_name} confirmed.`,
-      'reservation_confirmed'  // type used in role filter
+      'reservation_confirmed'
     ).catch(console.error)
+
+    // Audit
     logAudit({
       tenantId, staffId,
       action: 'reservation.confirmed',
       entity: 'reservation', entityId: reservation.id,
       details: { guest: reservation.guest_name }
     }).catch(console.error)
+
+    // Create folio – fetch the stay that was just created by the reservation service
+    try {
+      const stayResult = await db.execute(sql`
+        SELECT id, guest_name FROM stays WHERE reservation_id = ${reservation.id} ORDER BY created_at DESC LIMIT 1
+      `)
+      if (stayResult.rows.length > 0) {
+        const stay = stayResult.rows[0]
+        await createFolio(stay.id, reservation.id, stay.guest_name)
+        console.log(`Folio created for stay ${stay.id}`)
+      }
+    } catch (err) {
+      console.error('Failed to create folio on reservation.confirmed:', err)
+    }
   })
 
   eventBus.on('*', 'reservation.cancelled', (payload: any) => {
@@ -42,14 +59,12 @@ export function registerListeners() {
   eventBus.on('*', 'room.assigned', (payload: any) => {
     const { tenantId, reservationId, roomNumber, guestName, staffId } = payload
 
-    // Housekeeping (they need to know about the room)
     sendNotificationToRoles(tenantId, ['housekeeping', 'head_housekeeping'],
       '🛏️ Room Assigned',
       `Room ${roomNumber} assigned to ${guestName}.`,
       'room_assigned'
     ).catch(console.error)
 
-    // Front desk & admin
     sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk'],
       '🛏️ Room Assigned',
       `Room ${roomNumber} assigned to ${guestName}.`,
@@ -79,6 +94,37 @@ export function registerListeners() {
     }).catch(console.error)
   })
 
+  // ==================== CHECK‑OUT / FOLIO CLOSE + FINANCIAL EVENT ====================
+
+  eventBus.on('*', 'guest.checked_out', async (payload: any) => {
+    const { tenantId, stayId, guestName, roomNumber } = payload
+
+    sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk'],
+      '🏁 Guest Checked Out',
+      `${guestName} checked out of Room ${roomNumber}.`,
+      'info'
+    ).catch(console.error)
+
+    logAudit({
+      tenantId,
+      action: 'guest.checked_out',
+      entity: 'stay', entityId: stayId,
+      details: { guestName, roomNumber }
+    }).catch(console.error)
+
+    // Close the folio
+    try {
+      await closeFolio(stayId)
+      console.log(`Folio closed for stay ${stayId}`)
+
+      // Create immutable financial event packet
+      await createFinancialEvent(tenantId, stayId)
+      console.log(`Financial event created for stay ${stayId}`)
+    } catch (err) {
+      console.error('Failed to process checkout financial workflow:', err)
+    }
+  })
+
   // ==================== CLEANING EVENTS ====================
 
   eventBus.on('*', 'cleaning.requested', (payload: any) => {
@@ -86,7 +132,7 @@ export function registerListeners() {
     sendNotificationToRoles(tenantId, ['housekeeping', 'head_housekeeping'],
       '🧹 New Cleaning Request',
       `Room ${roomNumber} needs cleaning (${requestType}).`,
-      'cleaning'   // using 'cleaning' to match filter
+      'cleaning'
     ).catch(console.error)
     logAudit({
       tenantId, staffId,

@@ -24,6 +24,10 @@ superAdmin.get('/hotels', async (c) => {
         t.name,
         t.subdomain,
         t.created_at,
+        t.phone,
+        t.address,
+        t.amenities,
+        t.email_inbox_config,
         (SELECT COUNT(*) FROM rooms r WHERE r.tenant_id = t.id) as room_count,
         (SELECT COUNT(*) FROM staff s WHERE s.tenant_id = t.id) as staff_count
       FROM tenants t
@@ -36,82 +40,12 @@ superAdmin.get('/hotels', async (c) => {
   }
 })
 
-// POST /api/super-admin/register-hotel
-superAdmin.post('/register-hotel', async (c) => {
-  const body = await c.req.json()
-  const {
-    hotelName,
-    subdomain,
-    floors,
-    roomsPerFloor,
-    roomNumbers,
-    staffAssignments,
-    amenities,
-  } = body
-
-  if (!hotelName || !subdomain) {
-    return c.json({ error: 'Hotel name and subdomain are required' }, 400)
-  }
-  if (!staffAssignments || !Array.isArray(staffAssignments) || staffAssignments.length === 0) {
-    return c.json({ error: 'At least one staff member must be assigned' }, 400)
-  }
-
-  let finalRoomNumbers: string[] = []
-  if (roomNumbers && Array.isArray(roomNumbers) && roomNumbers.length > 0) {
-    finalRoomNumbers = roomNumbers
-  } else if (floors && roomsPerFloor) {
-    for (let floor = 1; floor <= floors; floor++) {
-      for (let room = 1; room <= roomsPerFloor; room++) {
-        finalRoomNumbers.push(`${floor}${String(room).padStart(2, '0')}`)
-      }
-    }
-  } else {
-    return c.json({ error: 'Either roomNumbers array or floors + roomsPerFloor is required' }, 400)
-  }
-
-  const defaultPassword = 'changeme123'
-
-  try {
-    await db.transaction(async (tx) => {
-      const tenantResult = await tx.execute(sql`
-        INSERT INTO tenants (id, name, subdomain, created_at, updated_at)
-        VALUES (gen_random_uuid(), ${hotelName}, ${subdomain}, NOW(), NOW())
-        RETURNING id
-      `)
-      const tenantId = tenantResult.rows[0].id
-
-      for (const roomNumber of finalRoomNumbers) {
-        const floor = parseInt(roomNumber.match(/^\d+/)?.[0] || '1')
-        await tx.execute(sql`
-          INSERT INTO rooms (id, tenant_id, room_number, floor, room_type, status, created_at, updated_at)
-          VALUES (gen_random_uuid(), ${tenantId}, ${roomNumber}, ${floor}, 'Standard', 'dirty', NOW(), NOW())
-        `)
-      }
-
-      for (const assignment of staffAssignments) {
-        const { role, email } = assignment
-        if (!role || !email) continue
-        const passwordHash = await bcrypt.hash(defaultPassword, 10)
-        await tx.execute(sql`
-          INSERT INTO staff (id, tenant_id, name, email, password_hash, role, active, created_at, updated_at, is_super_admin)
-          VALUES (gen_random_uuid(), ${tenantId}, ${email.split('@')[0]}, ${email}, ${passwordHash}, ${role}, true, NOW(), NOW(), false)
-        `)
-      }
-    })
-
-    return c.json({ success: true, message: `Hotel '${hotelName}' registered successfully` }, 201)
-  } catch (err: any) {
-    console.error('Hotel registration error:', err)
-    return c.json({ error: err.message }, 500)
-  }
-})
-
 // GET /api/super-admin/hotels/:hotelId
 superAdmin.get('/hotels/:hotelId', async (c) => {
   const { hotelId } = c.req.param()
   try {
     const hotelResult = await db.execute(sql`
-      SELECT id, name, subdomain, logo_url, created_at
+      SELECT id, name, subdomain, logo_url, phone, address, amenities, email_inbox_config, created_at
       FROM tenants WHERE id = ${hotelId}
     `)
     if (hotelResult.rows.length === 0) {
@@ -138,6 +72,95 @@ superAdmin.get('/hotels/:hotelId', async (c) => {
   } catch (err: any) {
     console.error('Hotel detail error:', err)
     return c.json({ error: err.message }, 500)
+  }
+})
+
+// POST /api/super-admin/register-hotel
+superAdmin.post('/register-hotel', async (c) => {
+  const body = await c.req.json()
+  const {
+    hotelName,
+    subdomain,
+    address,
+    phone,
+    logoUrl,
+    emailInboxConfig,        // { email, protocol, server, port, username, password }
+    amenities,               // string[] e.g. ["Pool","Spa"]
+    staffAssignments,        // { name, email, role, password?, phone? }[]
+    roomConfiguration,       // { roomType: string, floors: { floor: number, count: number }[] }[]
+  } = body
+
+  if (!hotelName || !subdomain) {
+    return c.json({ error: 'Hotel name and subdomain are required' }, 400)
+  }
+  if (!staffAssignments || !Array.isArray(staffAssignments) || staffAssignments.length === 0) {
+    return c.json({ error: 'At least one staff member must be assigned' }, 400)
+  }
+  if (!roomConfiguration || !Array.isArray(roomConfiguration) || roomConfiguration.length === 0) {
+    return c.json({ error: 'Room configuration is required' }, 400)
+  }
+
+  const defaultPassword = 'changeme123'
+
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Create tenant
+      const tenantResult = await tx.execute(sql`
+        INSERT INTO tenants (id, name, subdomain, logo_url, address, phone, amenities, email_inbox_config, created_at, updated_at)
+        VALUES (
+          gen_random_uuid(),
+          ${hotelName},
+          ${subdomain},
+          ${logoUrl || null},
+          ${address ? JSON.stringify(address) : null}::jsonb,
+          ${phone || null},
+          ${amenities ? JSON.stringify(amenities) : null}::jsonb,
+          ${emailInboxConfig ? JSON.stringify(emailInboxConfig) : null}::jsonb,
+          NOW(),
+          NOW()
+        )
+        RETURNING id
+      `)
+      const tenantId = tenantResult.rows[0].id
+
+      // 2. Create rooms from room configuration
+      if (roomConfiguration && roomConfiguration.length > 0) {
+        for (const typeBlock of roomConfiguration) {
+          const roomType = typeBlock.roomType || 'Standard'
+          if (typeBlock.floors && Array.isArray(typeBlock.floors)) {
+            for (const floorEntry of typeBlock.floors) {
+              const floor = floorEntry.floor
+              const count = floorEntry.count || 0
+              // Generate room numbers: floor*100 + sequence starting at 1
+              for (let i = 1; i <= count; i++) {
+                const roomNumber = `${floor}${String(i).padStart(2, '0')}`
+                await tx.execute(sql`
+                  INSERT INTO rooms (id, tenant_id, room_number, floor, room_type, status, created_at, updated_at)
+                  VALUES (gen_random_uuid(), ${tenantId}, ${roomNumber}, ${floor}, ${roomType}, 'dirty', NOW(), NOW())
+                `)
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Create staff
+      for (const assignment of staffAssignments) {
+        const { name, email, role, password, phone } = assignment
+        if (!email || !role) continue
+        const passwordToHash = password || defaultPassword
+        const passwordHash = await bcrypt.hash(passwordToHash, 10)
+        await tx.execute(sql`
+          INSERT INTO staff (id, tenant_id, name, email, password_hash, role, phone, active, created_at, updated_at, is_super_admin)
+          VALUES (gen_random_uuid(), ${tenantId}, ${name || email.split('@')[0]}, ${email}, ${passwordHash}, ${role}, ${phone || null}, true, NOW(), NOW(), false)
+        `)
+      }
+    })
+
+    return c.json({ success: true, message: `Hotel '${hotelName}' registered successfully` }, 201)
+  } catch (err: any) {
+    console.error('Hotel registration error:', err)
+    return c.json({ error: err.message || 'Failed to register hotel' }, 500)
   }
 })
 
