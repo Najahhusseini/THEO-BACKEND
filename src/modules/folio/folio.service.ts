@@ -59,7 +59,6 @@ export async function buildFinancialEventPayload(stayId: string) {
   const items = await getFolioItems(folio.id)
   const totalAmount = items.reduce((sum: number, item: any) => sum + parseFloat(item.amount), 0)
 
-  // Fetch stay details
   const stayResult = await db.execute(sql`
     SELECT s.*, r.room_number, r.tenant_id
     FROM stays s
@@ -68,7 +67,6 @@ export async function buildFinancialEventPayload(stayId: string) {
   `)
   const stay = stayResult.rows[0]
 
-  // Fetch tenant (hotel) info
   const tenantResult = await db.execute(sql`
     SELECT id, name, subdomain, address, phone FROM tenants WHERE id = ${stay.tenant_id}
   `)
@@ -100,8 +98,8 @@ export async function buildFinancialEventPayload(stayId: string) {
       currency: 'USD',
       items: items.map((item: any) => ({
         description: item.description,
-        quantity: item.quantity,
-        unit_price: parseFloat(item.unit_price),
+        quantity: item.quantity || 1,
+        unit_price: parseFloat(item.unit_price) || parseFloat(item.amount),
         amount: parseFloat(item.amount),
         charge_type: item.charge_type,
         tax_code: item.tax_code,
@@ -114,11 +112,9 @@ export async function buildFinancialEventPayload(stayId: string) {
 // Create an immutable financial event (outbox entry)
 export async function createFinancialEvent(tenantId: string, stayId: string) {
   const payload = await buildFinancialEventPayload(stayId)
-
   await db.execute(sql`
     INSERT INTO financial_events (tenant_id, event_type, payload, status)
     VALUES (${tenantId}, 'folio.closed', ${JSON.stringify(payload)}, 'pending')
   `)
-
   console.log(`Financial event created for stay ${stayId}`)
 }

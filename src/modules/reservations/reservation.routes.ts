@@ -130,6 +130,38 @@ reservations.post('/stays/:stayId/check-in', async (c) => {
     }
 })
 
+// ========== Toggle key issued ==========
+reservations.patch('/stays/:stayId/key', async (c) => {
+    const user = c.get('user')
+    if (!user) return c.json({ error: 'Unauthorized' }, 401)
+    if (!['admin', 'manager', 'frontdesk'].includes(user.role)) {
+        return c.json({ error: 'Forbidden' }, 403)
+    }
+
+    const { stayId } = c.req.param()
+    const { key_issued } = await c.req.json()
+
+    if (typeof key_issued !== 'boolean') {
+        return c.json({ error: 'key_issued (boolean) required' }, 400)
+    }
+
+    try {
+        const result = await db.execute(sql`
+            UPDATE stays
+            SET key_issued = ${key_issued}, updated_at = NOW()
+            WHERE id = ${stayId}
+            RETURNING *
+        `)
+        if (result.rows.length === 0) {
+            return c.json({ error: 'Stay not found' }, 404)
+        }
+        return c.json(result.rows[0])
+    } catch (err: any) {
+        console.error('Key update error:', err)
+        return c.json({ error: err.message }, 500)
+    }
+})
+
 // ========== Move a stay to a different room ==========
 reservations.patch('/stays/:stayId/move-room', async (c) => {
     const user = c.get('user')
@@ -300,7 +332,7 @@ reservations.post('/', async (c) => {
         const reservation = await createReservation({
             ...parsed.data,
             status: parsed.data.status,
-            tenantId: user.tenantId,   // ✅ pass tenant ID
+            tenantId: user.tenantId,
         })
 
         eventBus.emit(user.tenantId, 'reservation.created', {
@@ -477,6 +509,32 @@ reservations.post('/stays/:stayId/check-out', async (c) => {
     return c.json(stay)
   } catch (err: any) {
     console.error('Check‑out error:', err)
+    return c.json({ error: err.message }, 500)
+  }
+})
+
+// ========== Update reservation notes ==========
+reservations.patch('/:id/notes', async (c) => {
+  const user = c.get('user')
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  if (!['admin', 'manager', 'reservation_manager', 'frontdesk'].includes(user.role)) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+
+  const { id } = c.req.param()
+  const { notes } = await c.req.json()
+
+  if (!Array.isArray(notes)) {
+    return c.json({ error: 'notes must be an array' }, 400)
+  }
+
+  try {
+    await db.execute(sql`
+      UPDATE reservations SET notes = ${JSON.stringify(notes)}::jsonb WHERE id = ${id}
+    `)
+    return c.json({ success: true })
+  } catch (err: any) {
+    console.error('Notes update error:', err)
     return c.json({ error: err.message }, 500)
   }
 })

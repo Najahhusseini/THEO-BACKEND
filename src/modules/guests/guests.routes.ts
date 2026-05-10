@@ -59,4 +59,30 @@ guests.get('/:guestId/details', async (c) => {
   return c.json(reservations.rows)
 })
 
+// ✅ NEW: Update guest notes
+guests.patch('/:guestId/notes', async (c) => {
+  const user = c.get('user')
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  if (!['admin', 'manager', 'frontdesk', 'reservation_manager'].includes(user.role)) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+
+  const { guestId } = c.req.param()
+  const { notes } = await c.req.json()
+
+  if (!Array.isArray(notes)) {
+    return c.json({ error: 'notes must be an array' }, 400)
+  }
+
+  try {
+    await db.execute(sql`
+      UPDATE guests SET notes = ${JSON.stringify(notes)}::jsonb WHERE id = ${guestId}
+    `)
+    return c.json({ success: true })
+  } catch (err: any) {
+    console.error('Notes update error:', err)
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 export default guests

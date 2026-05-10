@@ -12,6 +12,7 @@ import tasks from './modules/tasks/tasks.routes'
 import supplies from './modules/supplies/supplies.routes'
 import notifications from './modules/notifications/notifications.routes'
 import reservations from './modules/reservations/reservation.routes'
+import folioRoutes from './modules/folio/folio.routes'
 import emailRouter from './modules/email/email.routes'
 import superAdmin from './modules/super-admin/super-admin.routes'
 import adminStaff from './modules/admin-staff/admin-staff.routes'
@@ -70,6 +71,9 @@ app.route('/api/admin-staff', adminStaff)
 
 app.use('/api/guests/*', authMiddleware)
 app.route('/api/guests', guestsRoutes)
+
+app.use('/api/folio/*', authMiddleware)
+app.route('/api/folio', folioRoutes)
 
 // Reservations: protect all except public-test
 app.use('/api/reservations/*', async (c, next) => {

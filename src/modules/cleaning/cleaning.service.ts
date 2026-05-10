@@ -37,6 +37,8 @@ export async function getRoomsWithCleaning(tenantId: string) {
             r.room_number,
             r.floor,
             r.room_type,
+            r.price_per_night,
+            r.notes,                                 -- ✅ ADDED
             r.cleaning_status,
             r.last_cleaning_update,
             r.status as room_status,
@@ -697,7 +699,7 @@ export async function getOutOfOrderRooms(tenantId: string) {
   return result.rows
 }
 
-// ============ SCHEDULE & CLAIM (NEW) ============
+// ============ SCHEDULE & CLAIM ============
 
 // Schedule a room for a specific staff member (status 'scheduled')
 export async function scheduleRoom(roomId: string, staffId: string, shiftDate: string) {

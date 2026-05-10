@@ -91,7 +91,7 @@ export function registerListeners() {
     }).catch(console.error)
   })
 
-  // ==================== CHECK‑OUT / FOLIO CLOSE + FINANCIAL EVENT ====================
+  // ==================== CHECK‑OUT / FOLIO CLOSE + FINANCIAL EVENT + ROOM CLEANING ====================
 
   eventBus.on('*', 'guest.checked_out', async (payload: any) => {
     const { tenantId, stayId, guestName, roomNumber } = payload
@@ -109,6 +109,7 @@ export function registerListeners() {
       details: { guestName, roomNumber }
     }).catch(console.error)
 
+    // Close folio & create financial event
     try {
       await closeFolio(stayId)
       console.log(`Folio closed for stay ${stayId}`)
@@ -116,6 +117,46 @@ export function registerListeners() {
       console.log(`Financial event created for stay ${stayId}`)
     } catch (err) {
       console.error('Failed to process checkout financial workflow:', err)
+    }
+
+    // ✅ Mark room dirty and create cleaning request
+    try {
+      // Update room status to dirty
+      await db.execute(sql`
+        UPDATE rooms SET cleaning_status = 'dirty', last_cleaning_update = NOW()
+        WHERE room_number = ${roomNumber}
+      `)
+
+      // Create a cleaning request if not already exists
+      const existing = await db.execute(sql`
+        SELECT id FROM cleaning_requests
+        WHERE room_id = (SELECT id FROM rooms WHERE room_number = ${roomNumber})
+          AND status IN ('pending','assigned','in_progress')
+        LIMIT 1
+      `)
+      if (existing.rows.length === 0) {
+        await db.execute(sql`
+          INSERT INTO cleaning_requests (room_id, requested_by, request_type, notes, status)
+          VALUES (
+            (SELECT id FROM rooms WHERE room_number = ${roomNumber}),
+            (SELECT id FROM staff WHERE tenant_id = ${tenantId} AND role = 'head_housekeeping' LIMIT 1),
+            'checkout',
+            'Auto-created after check-out',
+            'pending'
+          )
+        `)
+      }
+
+      // Notify housekeeping
+      sendNotificationToRoles(tenantId, ['housekeeping', 'head_housekeeping'],
+        '🧹 Checkout Cleaning Needed',
+        `Room ${roomNumber} is now dirty after guest check‑out.`,
+        'cleaning'
+      ).catch(console.error)
+
+      console.log(`Room ${roomNumber} marked dirty and cleaning request created`)
+    } catch (err) {
+      console.error('Failed to mark room dirty on checkout:', err)
     }
   })
 
@@ -210,7 +251,6 @@ export function registerListeners() {
       await db.execute(sql`
         UPDATE cleaning_requests SET status = 'assigned' WHERE id = ${row.id}
       `);
-      // Optionally mark room as assigned in rooms table
       await db.execute(sql`
         UPDATE rooms SET assigned_cleaner_id = ${staffId}, cleaning_status = 'dirty' WHERE id = ${row.room_id}
       `);
