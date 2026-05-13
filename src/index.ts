@@ -19,7 +19,8 @@ import adminStaff from './modules/admin-staff/admin-staff.routes'
 import guestsRoutes from './modules/guests/guests.routes'
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
-import { registerListeners } from './events/listeners'   // ✅ NEW
+import { markOccupiedRoomsDirty } from './modules/automation/dirty-room.service'
+import { registerListeners } from './events/listeners'
 import 'dotenv/config'
 
 const app = new Hono()
@@ -86,8 +87,31 @@ app.route('/api/reservations', reservations)
 app.use('/api/emails/*', authMiddleware)
 app.route('/api/emails', emailRouter)
 
-// ✅ Register cross-module event listeners
+// Register cross-module event listeners
 registerListeners()
+
+// ⏰ Daily 6am dirty‑room automation
+function scheduleDailyTask() {
+  const now = new Date()
+  const next6am = new Date(now)
+  next6am.setHours(6, 0, 0, 0)
+  if (now >= next6am) {
+    next6am.setDate(next6am.getDate() + 1)
+  }
+  const msUntil6am = next6am.getTime() - now.getTime()
+
+  console.log(`⏰ Dirty‑room automation scheduled in ${Math.round(msUntil6am / 1000 / 60)} minutes.`)
+
+  setTimeout(() => {
+    markOccupiedRoomsDirty().catch(console.error)
+    // Then repeat every 24 hours
+    setInterval(() => {
+      markOccupiedRoomsDirty().catch(console.error)
+    }, 24 * 60 * 60 * 1000)
+  }, msUntil6am)
+}
+
+scheduleDailyTask()
 
 // API home
 app.get('/api', (c) => c.json({ message: 'THEO Mini API v1' }))

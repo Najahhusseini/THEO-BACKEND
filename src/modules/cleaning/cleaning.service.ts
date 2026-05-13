@@ -38,7 +38,7 @@ export async function getRoomsWithCleaning(tenantId: string) {
             r.floor,
             r.room_type,
             r.price_per_night,
-            r.notes,                                 -- ✅ ADDED
+            r.notes,
             r.cleaning_status,
             r.last_cleaning_update,
             r.status as room_status,
@@ -50,9 +50,10 @@ export async function getRoomsWithCleaning(tenantId: string) {
             cr.status as request_status,
             cr.request_type,
             cr.assigned_to,
+            cr.assigned_to as assigned_to_id,               -- ✅ NEW
             cr.started_at,
             cr.duration_seconds,
-            assigned.name as assigned_to_name,
+            COALESCE(assigned.name, assigned_cleaner.name) as assigned_to_name,
             assigned.role as assigned_to_role,
             CASE 
                 WHEN cr.request_type IS NOT NULL THEN cr.request_type
@@ -242,7 +243,7 @@ export async function assignCleaning(requestId: string, assignedTo: string) {
         WHERE id = ${roomId}
     `)
 
-    // Emit event for cleaning request assignment (notifications handled by listener)
+    // Emit event for cleaning request assignment
     eventBus.emit(tenantId, 'cleaning.assigned', {
         tenantId,
         roomId,
@@ -322,12 +323,10 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
             UPDATE rooms SET cleaning_status = 'ready' WHERE id = ${roomId}
         `);
         
-        // Emit cleaning completed (listener will notify head housekeeping, front desk)
         eventBus.emit(tenantId, 'cleaning.completed', {
             tenantId, roomId, roomNumber, requestId, staffId
         });
 
-        // Create inspection task for head (still necessary)
         const head = await db.execute(sql`
             SELECT id FROM staff 
             WHERE tenant_id = ${tenantId}
@@ -420,7 +419,6 @@ export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: s
                 `);
             }
 
-            // Emit cleaning requested event
             eventBus.emit(tenantId, 'cleaning.requested', {
                 tenantId,
                 roomId,
@@ -701,7 +699,6 @@ export async function getOutOfOrderRooms(tenantId: string) {
 
 // ============ SCHEDULE & CLAIM ============
 
-// Schedule a room for a specific staff member (status 'scheduled')
 export async function scheduleRoom(roomId: string, staffId: string, shiftDate: string) {
   await db.execute(sql`
     INSERT INTO cleaning_requests (room_id, requested_by, request_type, notes, status, assigned_to, assigned_at)
@@ -710,7 +707,6 @@ export async function scheduleRoom(roomId: string, staffId: string, shiftDate: s
   return { success: true };
 }
 
-// Claim a pending room (no assigned cleaner, status 'pending')
 export async function claimRoom(roomId: string, staffId: string) {
   const existing = await db.execute(sql`
     SELECT id FROM cleaning_requests 

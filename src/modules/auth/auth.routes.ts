@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { generateAccessToken, generateRefreshToken, comparePassword, findStaffByEmail, findTenantBySubdomain, verifyRefreshToken, verifyAccessToken } from './auth.service'
 import { db } from '../../db'
-import { staff } from '../../db/schema'
+import { staff, tenants } from '../../db/schema'   // ✅ tenants imported
 import { eq } from 'drizzle-orm'
 
 const auth = new Hono()
@@ -55,7 +55,7 @@ auth.post('/login', async (c) => {
       tenantId: staffMember.tenantId,
       email: staffMember.email,
       role: staffMember.role,
-      isSuperAdmin: staffMember.isSuperAdmin,   // ✅ NEW
+      isSuperAdmin: staffMember.isSuperAdmin,
     }
 
     const accessToken = generateAccessToken(payload)
@@ -75,7 +75,8 @@ auth.post('/login', async (c) => {
         name: staffMember.name,
         email: staffMember.email,
         role: staffMember.role,
-        isSuperAdmin: staffMember.isSuperAdmin,   // ✅ also returned to frontend
+        isSuperAdmin: staffMember.isSuperAdmin,
+        amenities: tenant.amenities || [],          // ✅ NEW
       },
     })
   } catch (error) {
@@ -94,7 +95,6 @@ auth.post('/refresh', async (c) => {
       return c.json({ error: 'Invalid refresh token' }, 401)
     }
 
-    // Get fresh staff data
     const staffMember = await db.select().from(staff).where(eq(staff.id, payload.staffId)).limit(1)
 
     if (!staffMember[0] || !staffMember[0].active) {
@@ -106,7 +106,7 @@ auth.post('/refresh', async (c) => {
       tenantId: staffMember[0].tenantId,
       email: staffMember[0].email,
       role: staffMember[0].role,
-      isSuperAdmin: staffMember[0].isSuperAdmin,   // ✅ NEW
+      isSuperAdmin: staffMember[0].isSuperAdmin,
     })
 
     return c.json({ accessToken: newAccessToken })
@@ -116,7 +116,7 @@ auth.post('/refresh', async (c) => {
   }
 })
 
-// Get current user info
+// Get current user info – now includes hotel amenities
 auth.get('/me', async (c) => {
   try {
     const authHeader = c.req.header('Authorization')
@@ -138,13 +138,17 @@ auth.get('/me', async (c) => {
       return c.json({ error: 'Staff not found' }, 404)
     }
 
+    // Fetch tenant to get amenities
+    const tenant = await db.select().from(tenants).where(eq(tenants.id, staffMember[0].tenantId)).limit(1)
+
     return c.json({
       id: staffMember[0].id,
       name: staffMember[0].name,
       email: staffMember[0].email,
       role: staffMember[0].role,
       tenantId: staffMember[0].tenantId,
-      isSuperAdmin: staffMember[0].isSuperAdmin,   // ✅ NEW
+      isSuperAdmin: staffMember[0].isSuperAdmin,
+      amenities: tenant[0]?.amenities || [],        // ✅ NEW
     })
   } catch (error) {
     console.error('Me endpoint error:', error)
@@ -161,7 +165,6 @@ auth.post('/super-login', async (c) => {
       return c.json({ error: 'Email and password are required' }, 400)
     }
 
-    // Find the staff member by email only (could be any tenant)
     const staffMember = await db.select().from(staff).where(eq(staff.email, email)).limit(1)
 
     if (!staffMember[0]) {

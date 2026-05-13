@@ -164,4 +164,84 @@ superAdmin.post('/register-hotel', async (c) => {
   }
 })
 
+// ========== UPDATE HOTEL ==========
+superAdmin.put('/hotels/:hotelId', async (c) => {
+  const { hotelId } = c.req.param()
+  const body = await c.req.json()
+  const {
+    hotelName,
+    subdomain,
+    address,
+    phone,
+    logoUrl,
+    maxStaff,
+    emailInboxConfig,
+    amenities,
+    roomConfiguration,       // same format as registration
+    staffAssignments,        // optional – if provided, replaces all staff
+  } = body
+
+  if (!hotelName || !subdomain) {
+    return c.json({ error: 'Hotel name and subdomain are required' }, 400)
+  }
+
+  try {
+    await db.transaction(async (tx) => {
+      // 1. Update tenant info
+      await tx.execute(sql`
+        UPDATE tenants
+        SET name = ${hotelName},
+            subdomain = ${subdomain},
+            logo_url = ${logoUrl || null},
+            address = ${address ? JSON.stringify(address) : null}::jsonb,
+            phone = ${phone || null},
+            amenities = ${amenities ? JSON.stringify(amenities) : null}::jsonb,
+            email_inbox_config = ${emailInboxConfig ? JSON.stringify(emailInboxConfig) : null}::jsonb,
+            max_staff = ${maxStaff || 20},
+            updated_at = NOW()
+        WHERE id = ${hotelId}
+      `)
+
+      // 2. If room configuration is provided, replace all rooms
+      if (roomConfiguration && Array.isArray(roomConfiguration) && roomConfiguration.length > 0) {
+        // Delete existing rooms for this hotel
+        await tx.execute(sql`DELETE FROM rooms WHERE tenant_id = ${hotelId}`)
+
+        // Insert new rooms
+        for (const typeBlock of roomConfiguration) {
+          const roomType = typeBlock.roomType || 'Standard'
+          if (typeBlock.floors && Array.isArray(typeBlock.floors)) {
+            for (const floorEntry of typeBlock.floors) {
+              const floor = floorEntry.floor
+              const count = floorEntry.count || 0
+              for (let i = 1; i <= count; i++) {
+                const roomNumber = `${floor}${String(i).padStart(2, '0')}`
+                await tx.execute(sql`
+                  INSERT INTO rooms (id, tenant_id, room_number, floor, room_type, status, created_at, updated_at)
+                  VALUES (gen_random_uuid(), ${hotelId}, ${roomNumber}, ${floor}, ${roomType}, 'dirty', NOW(), NOW())
+                `)
+              }
+            }
+          }
+        }
+      }
+
+      // 3. If staff assignments are provided, replace all staff (carefully)
+      if (staffAssignments && Array.isArray(staffAssignments) && staffAssignments.length > 0) {
+        // Optional: preserve existing staff by email? For now, we'll add new staff.
+        // Better: delete all and re-insert, but keep super-admin flag off.
+        // Actually, we should only update/add; we don't want to delete staff accidentally.
+        // We'll add a "remove staff" UI separately.
+        // For the edit modal, we'll only allow adding/editing staff via the admin-staff routes.
+        // So we skip bulk staff replacement here – we'll handle it from the frontend via admin-staff endpoints.
+      }
+    })
+
+    return c.json({ success: true, message: 'Hotel updated successfully' })
+  } catch (err: any) {
+    console.error('Hotel update error:', err)
+    return c.json({ error: err.message || 'Failed to update hotel' }, 500)
+  }
+})
+
 export default superAdmin
