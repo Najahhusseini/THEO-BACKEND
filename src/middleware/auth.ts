@@ -18,5 +18,23 @@ export async function authMiddleware(c: Context, next: Next) {
   // Attach user info to context
   c.set('user', payload)
 
+  // ✅ Attach tenantId from the payload (used for multi‑tenancy)
+  if (payload.tenant_id) {
+    c.set('tenantId', payload.tenant_id)
+  } else {
+    c.set('tenantId', null) // or undefined, depending on your logic
+  }
+
   await next()
+}
+
+// Role-based authorization middleware
+export const requireRole = (roles: string[]) => {
+  return async (c: Context, next: Next) => {
+    const user = c.get('user')
+    if (!user || !roles.includes(user.role)) {
+      return c.json({ error: 'Forbidden: insufficient permissions' }, 403)
+    }
+    await next()
+  }
 }

@@ -17,6 +17,11 @@ import emailRouter from './modules/email/email.routes'
 import superAdmin from './modules/super-admin/super-admin.routes'
 import adminStaff from './modules/admin-staff/admin-staff.routes'
 import guestsRoutes from './modules/guests/guests.routes'
+import maintenanceRoutes from './modules/maintenance/maintenance.routes'
+import { WebhookService } from './modules/webhook/webhook.service';
+import webhookRoutes from './modules/webhook/webhook.routes';
+import financialRoutes from './modules/financial/financial.routes'   // <-- ADD THIS
+import { authMiddleware } from './middleware/auth'
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
 import { markOccupiedRoomsDirty } from './modules/automation/dirty-room.service'
@@ -76,6 +81,14 @@ app.route('/api/guests', guestsRoutes)
 app.use('/api/folio/*', authMiddleware)
 app.route('/api/folio', folioRoutes)
 
+app.use('/api/admin/*', authMiddleware)
+app.route('/api/admin', financialRoutes) 
+
+app.use('/api/maintenance/*', authMiddleware)
+app.route('/api/maintenance', maintenanceRoutes)
+
+app.use('/api', webhookRoutes);
+
 // Reservations: protect all except public-test
 app.use('/api/reservations/*', async (c, next) => {
     if (c.req.path === '/public-test') return next()
@@ -117,6 +130,29 @@ scheduleDailyTask()
 app.get('/api', (c) => c.json({ message: 'THEO Mini API v1' }))
 
 const port = parseInt(process.env.PORT || '4000')
+
+// Process pending financial events every 60 seconds
+function scheduleWebhookProcessing() {
+  setInterval(async () => {
+    try {
+      // In a real multi‑tenant system, you'd loop through all tenants
+      // For now, we assume a default tenant – you can adapt later
+      const tenantsList = await db.select({ id: tenants.id }).from(tenants);
+      for (const tenant of tenantsList) {
+        const service = new WebhookService();
+        const result = await service.processPendingEvents(tenant.id);
+        if (result.processed > 0) {
+          console.log(`📤 Processed ${result.processed} webhook events for tenant ${tenant.id}`);
+        }
+      }
+    } catch (err) {
+      console.error('Webhook processing error:', err);
+    }
+  }, 60 * 1000); // every 60 seconds
+}
+
+scheduleWebhookProcessing();
+
 
 serve({
   fetch: app.fetch,

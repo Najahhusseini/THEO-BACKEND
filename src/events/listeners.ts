@@ -1,9 +1,19 @@
+import axios from 'axios';
 import { eventBus } from './eventBus'
 import { sendNotificationToRoles } from '../modules/notifications/notification.service'
 import { logAudit } from '../audit/audit.service'
 import { db } from '../db'
 import { sql } from 'drizzle-orm'
 import { createFolio, closeFolio, createFinancialEvent } from '../modules/folio/folio.service'
+
+// Helper to forward event to Godot relay (fire & forget)
+async function forwardToVisualizer(event: any) {
+  try {
+    await axios.post('http://localhost:4001/event', event);
+  } catch (err) {
+    // Silently ignore if relay not running
+  }
+}
 
 export function registerListeners() {
 
@@ -37,6 +47,9 @@ export function registerListeners() {
     } catch (err) {
       console.error('Failed to create folio on reservation.confirmed:', err)
     }
+
+    // Forward to visualizer (room status might become occupied when later assigned/checked in)
+    // Not directly forwarding reservation.confirmed because rooms aren't assigned yet.
   })
 
   eventBus.on('*', 'reservation.cancelled', (payload: any) => {
@@ -74,6 +87,9 @@ export function registerListeners() {
       entity: 'reservation', entityId: reservationId,
       details: { roomNumber, guestName }
     }).catch(console.error)
+
+    // Forward to Godot visualizer
+    forwardToVisualizer({ type: 'room_assigned', data: payload });
   })
 
   eventBus.on('*', 'guest.checked_in', (payload: any) => {
@@ -89,6 +105,9 @@ export function registerListeners() {
       entity: 'stay', entityId: stayId,
       details: { guestName, roomNumber }
     }).catch(console.error)
+
+    // Forward to Godot visualizer (room becomes occupied)
+    forwardToVisualizer({ type: 'guest_checked_in', data: payload });
   })
 
   // ==================== CHECK‑OUT / FOLIO CLOSE + FINANCIAL EVENT + ROOM CLEANING ====================
@@ -121,13 +140,11 @@ export function registerListeners() {
 
     // ✅ Mark room dirty and create cleaning request
     try {
-      // Update room status to dirty
       await db.execute(sql`
         UPDATE rooms SET cleaning_status = 'dirty', last_cleaning_update = NOW()
         WHERE room_number = ${roomNumber}
       `)
 
-      // Create a cleaning request if not already exists
       const existing = await db.execute(sql`
         SELECT id FROM cleaning_requests
         WHERE room_id = (SELECT id FROM rooms WHERE room_number = ${roomNumber})
@@ -147,7 +164,6 @@ export function registerListeners() {
         `)
       }
 
-      // Notify housekeeping
       sendNotificationToRoles(tenantId, ['housekeeping', 'head_housekeeping'],
         '🧹 Checkout Cleaning Needed',
         `Room ${roomNumber} is now dirty after guest check‑out.`,
@@ -158,6 +174,15 @@ export function registerListeners() {
     } catch (err) {
       console.error('Failed to mark room dirty on checkout:', err)
     }
+
+    // Forward to Godot (guest_checked_out → room becomes vacant/dirty, visualizer will use room state)
+    forwardToVisualizer({ type: 'guest_checked_out', data: payload });
+
+    // Additionally forward a room_state_changed event so the visualizer can turn the room red (dirty)
+    forwardToVisualizer({ 
+      type: 'room_state_changed', 
+      data: { roomNumber, newStatus: 'dirty', tenantId } 
+    });
   })
 
   // ==================== CLEANING EVENTS ====================
@@ -175,6 +200,12 @@ export function registerListeners() {
       entity: 'room', entityId: roomId,
       details: { roomNumber, requestType }
     }).catch(console.error)
+
+    // Forward as room_state_changed with status 'dirty' (visualizer will color accordingly)
+    forwardToVisualizer({ 
+      type: 'room_state_changed', 
+      data: { roomNumber, newStatus: 'dirty', tenantId } 
+    });
   })
 
   eventBus.on('*', 'cleaning.completed', (payload: any) => {
@@ -190,6 +221,12 @@ export function registerListeners() {
       entity: 'room', entityId: roomId,
       details: { roomNumber }
     }).catch(console.error)
+
+    // Forward as room_state_changed with status 'ready' (green in visualizer)
+    forwardToVisualizer({ 
+      type: 'room_state_changed', 
+      data: { roomNumber, newStatus: 'ready', tenantId } 
+    });
   })
 
   eventBus.on('*', 'room.status_changed', (payload: any) => {
@@ -200,26 +237,56 @@ export function registerListeners() {
       entity: 'room', entityId: roomId,
       details: { roomNumber, oldStatus, newStatus }
     }).catch(console.error)
+
+    // Forward generic room_state_changed – visualizer will apply appropriate color
+    forwardToVisualizer({ 
+      type: 'room_state_changed', 
+      data: { roomNumber, newStatus, tenantId } 
+    });
   })
 
-  eventBus.on('*', 'room.out_of_order', (payload: any) => {
+  // ==================== ROOM OUT OF ORDER (includes maintenance task creation) ====================
+
+  eventBus.on('*', 'room.out_of_order', async (payload: any) => {
     const { tenantId, roomId, roomNumber, reason, staffId } = payload
-    sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'head_housekeeping'],
+
+    sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'head_housekeeping', 'maintenance', 'head_maintenance'],
       '🚫 Room Out of Order',
       `Room ${roomNumber} marked out of order: ${reason}`,
       'room_out_of_order'
     ).catch(console.error)
+
     logAudit({
       tenantId, staffId,
       action: 'room.out_of_order',
       entity: 'room', entityId: roomId,
       details: { roomNumber, reason }
     }).catch(console.error)
+
+    try {
+      await db.execute(sql`
+        INSERT INTO tasks (tenant_id, title, description, status, priority, room_id, created_by_staff_id)
+        VALUES (
+          ${tenantId},
+          ${`Maintenance: Room ${roomNumber}`},
+          ${reason},
+          'pending',
+          'medium',
+          ${roomId},
+          ${staffId}
+        )
+      `)
+    } catch (err) {
+      console.error('Failed to create maintenance task:', err)
+    }
+
+    // Forward to visualizer (room becomes out of order)
+    forwardToVisualizer({ type: 'room_out_of_order', data: payload });
   })
 
   eventBus.on('*', 'room.back_in_service', (payload: any) => {
     const { tenantId, roomId, roomNumber, staffId } = payload
-    sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'head_housekeeping'],
+    sendNotificationToRoles(tenantId, ['admin', 'manager', 'frontdesk', 'head_housekeeping', 'maintenance', 'head_maintenance'],
       '✅ Room Back in Service',
       `Room ${roomNumber} is now back in service.`,
       'info'
@@ -230,13 +297,15 @@ export function registerListeners() {
       entity: 'room', entityId: roomId,
       details: { roomNumber }
     }).catch(console.error)
+
+    // Forward to visualizer (room back in service → reset color)
+    forwardToVisualizer({ type: 'room_back_in_service', data: payload });
   })
 
   // ==================== ATTENDANCE CLOCK‑IN AUTO‑ASSIGN ====================
 
   eventBus.on('*', 'attendance.clock_in', async (payload: any) => {
     const { staffId, tenantId, role } = payload;
-    // Only for housekeeping staff
     if (role !== 'housekeeping' && role !== 'head_housekeeping') return;
 
     const today = new Date().toISOString().split('T')[0];
@@ -259,5 +328,6 @@ export function registerListeners() {
     if (scheduled.rows.length > 0) {
       console.log(`Auto-assigned ${scheduled.rows.length} rooms to staff ${staffId} on clock-in.`);
     }
+    // No visualizer forward needed here unless you want to show cleaner location
   });
 }

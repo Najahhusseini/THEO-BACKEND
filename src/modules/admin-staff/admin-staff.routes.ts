@@ -54,6 +54,16 @@ adminStaff.post('/', async (c) => {
     return c.json({ error: 'Missing required fields' }, 400)
   }
 
+  // ✅ Updated allowed roles – includes maintenance
+  const allowedRoles = [
+    'admin', 'manager', 'frontdesk', 'reservation_manager',
+    'head_housekeeping', 'housekeeping',
+    'head_maintenance', 'maintenance'
+  ]
+  if (!allowedRoles.includes(role)) {
+    return c.json({ error: 'Invalid role' }, 400)
+  }
+
   try {
     // Check limit (safe if column missing)
     let maxStaff = 20
@@ -106,7 +116,7 @@ adminStaff.patch('/:staffId', async (c) => {
       return c.json({ error: 'Staff not found' }, 404)
     }
 
-    // Build SET clause explicitly (avoids sql.join issues)
+    // Build SET clause explicitly
     const setClauses: string[] = []
 
     if (role !== undefined) {

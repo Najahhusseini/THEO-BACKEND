@@ -543,7 +543,7 @@ export async function reassignRoom(roomId: string, newStaffId: string, reassigne
         SELECT id, role, name FROM staff WHERE id = ${newStaffId} AND active = true
     `)
     if (newStaff.rows.length === 0) throw new Error('Staff not found')
-    if (!['housekeeping', 'head_housekeeping'].includes(newStaff.rows[0].role)) {
+    if (!['head_housekeeping', 'admin', 'manager', 'housekeeping'].includes(role)) {
         throw new Error('Can only reassign to housekeeping staff')
     }
 

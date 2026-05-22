@@ -1,5 +1,6 @@
 import { db } from '../../db'
 import { sql } from 'drizzle-orm'
+import { FinancialService } from '../financial/financial.service'
 
 // Create a folio for a stay (called when a reservation is confirmed)
 export async function createFolio(stayId: string, reservationId: string, guestName: string) {
@@ -12,11 +13,17 @@ export async function createFolio(stayId: string, reservationId: string, guestNa
 }
 
 // Close the folio (when guest checks out)
-export async function closeFolio(stayId: string) {
+export async function closeFolio(stayId: string, tenantId: string) {
+  // First close the folio
   await db.execute(sql`
     UPDATE folios SET status = 'closed', closed_at = NOW()
     WHERE stay_id = ${stayId} AND status = 'open'
   `)
+
+  // Record financial event via the outbox
+  const financialService = new FinancialService()
+  const payload = await buildFinancialEventPayload(stayId)
+  await financialService.recordEvent(tenantId, 'guest.checked_out', payload)
 }
 
 // Get a folio by stay ID
@@ -109,12 +116,9 @@ export async function buildFinancialEventPayload(stayId: string) {
   }
 }
 
-// Create an immutable financial event (outbox entry)
+// Backward compatibility (if any other part of code calls this)
 export async function createFinancialEvent(tenantId: string, stayId: string) {
+  const financialService = new FinancialService()
   const payload = await buildFinancialEventPayload(stayId)
-  await db.execute(sql`
-    INSERT INTO financial_events (tenant_id, event_type, payload, status)
-    VALUES (${tenantId}, 'folio.closed', ${JSON.stringify(payload)}, 'pending')
-  `)
-  console.log(`Financial event created for stay ${stayId}`)
+  return financialService.recordEvent(tenantId, 'guest.checked_out', payload)
 }

@@ -1,7 +1,7 @@
-import { pgTable, uuid, text, timestamp, boolean, integer, pgEnum } from 'drizzle-orm/pg-core'
+import { pgTable, uuid, text, timestamp, boolean, integer, pgEnum, jsonb } from 'drizzle-orm/pg-core'
 
 // Enums
-export const staffRoleEnum = pgEnum('staff_role', ['admin', 'manager', 'frontdesk', 'housekeeping', 'maintenance'])
+export const staffRoleEnum = pgEnum('staff_role', ['admin', 'manager', 'frontdesk', 'housekeeping', 'head_housekeeping', 'maintenance', 'head_maintenance'])
 export const roomStatusEnum = pgEnum('room_status', ['dirty', 'cleaning', 'ready', 'inspected'])
 export const taskStatusEnum = pgEnum('task_status', ['pending', 'in_progress', 'completed', 'escalated'])
 export const taskPriorityEnum = pgEnum('task_priority', ['low', 'medium', 'high'])
@@ -26,7 +26,7 @@ export const staff = pgTable('staff', {
   phone: text('phone'),
   active: boolean('active').default(true),
   passwordHash: text('password_hash'),
-  isSuperAdmin: boolean('is_super_admin').default(false),   // ✅ NEW
+  isSuperAdmin: boolean('is_super_admin').default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
@@ -97,3 +97,31 @@ export const auditLogs = pgTable('audit_logs', {
   details: text('details'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
+
+// NEW: Financial Events table (outbox)
+export const financialEvents = pgTable('financial_events', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  eventType: text('event_type').notNull(),        // e.g., 'guest.checked_out', 'folio.charge'
+  payload: jsonb('payload').notNull(),
+  status: text('status').notNull().default('pending'), // pending, delivered, failed
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const webhookConfigurations = pgTable('webhook_configurations', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  url: text('url').notNull(),
+  secret: text('secret'),
+  enabled: boolean('enabled').default(true).notNull(),
+  retryCount: integer('retry_count').default(3).notNull(),
+  retryDelaySeconds: integer('retry_delay_seconds').default(60).notNull(),
+  timeoutSeconds: integer('timeout_seconds').default(10).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export type FinancialEvent = typeof financialEvents.$inferSelect;
+export type NewFinancialEvent = typeof financialEvents.$inferInsert;
