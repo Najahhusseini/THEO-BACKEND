@@ -54,11 +54,12 @@ adminStaff.post('/', async (c) => {
     return c.json({ error: 'Missing required fields' }, 400)
   }
 
-  // ✅ Updated allowed roles – includes maintenance
+  // ✅ Updated allowed roles – includes kitchen and bar roles
   const allowedRoles = [
     'admin', 'manager', 'frontdesk', 'reservation_manager',
     'head_housekeeping', 'housekeeping',
-    'head_maintenance', 'maintenance'
+    'head_maintenance', 'maintenance',
+    'kitchen_head', 'kitchen_staff', 'bar_head', 'bar_staff'
   ]
   if (!allowedRoles.includes(role)) {
     return c.json({ error: 'Invalid role' }, 400)
@@ -108,6 +109,17 @@ adminStaff.patch('/:staffId', async (c) => {
   const { staffId } = c.req.param()
   const { role, active, phone } = await c.req.json()
 
+  // Validate role if provided
+  const allowedRoles = [
+    'admin', 'manager', 'frontdesk', 'reservation_manager',
+    'head_housekeeping', 'housekeeping',
+    'head_maintenance', 'maintenance',
+    'kitchen_head', 'kitchen_staff', 'bar_head', 'bar_staff'
+  ]
+  if (role !== undefined && !allowedRoles.includes(role)) {
+    return c.json({ error: 'Invalid role' }, 400)
+  }
+
   try {
     const staffMember = await db.execute(sql`
       SELECT id FROM staff WHERE id = ${staffId} AND tenant_id = ${tenantId}
@@ -116,10 +128,12 @@ adminStaff.patch('/:staffId', async (c) => {
       return c.json({ error: 'Staff not found' }, 404)
     }
 
-    // Build SET clause explicitly
+    // Build SET clause explicitly (safe from SQL injection because values are parameterized or escaped)
     const setClauses: string[] = []
 
     if (role !== undefined) {
+      // Use parameterized query instead of string concatenation to be safe
+      // But since we're using sql.raw, we'll manually escape
       setClauses.push(`role = '${role.replace(/'/g, "''")}'`)
     }
     if (active !== undefined) {

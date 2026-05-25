@@ -34,6 +34,14 @@ export async function getFolioByStayId(stayId: string) {
   return result.rows[0]
 }
 
+// Get folio ID from stay ID (convenience)
+export async function getFolioIdByStayId(stayId: string): Promise<string | null> {
+  const result = await db.execute(sql`
+    SELECT id FROM folios WHERE stay_id = ${stayId} AND status = 'open'
+  `)
+  return result.rows[0]?.id || null
+}
+
 // Get all items for a folio
 export async function getFolioItems(folioId: string) {
   const result = await db.execute(sql`
@@ -42,7 +50,7 @@ export async function getFolioItems(folioId: string) {
   return result.rows
 }
 
-// Add a charge/payment/adjustment to a folio
+// Add a charge/payment/adjustment to a folio (by folio ID)
 export async function addFolioItem(
   folioId: string,
   description: string,
@@ -56,6 +64,20 @@ export async function addFolioItem(
     INSERT INTO folio_items (folio_id, description, amount, charge_type, quantity, unit_price, tax_code)
     VALUES (${folioId}, ${description}, ${amount}, ${chargeType}, ${quantity}, ${unitPrice || amount}, ${taxCode})
   `)
+}
+
+// NEW: Add a charge to a folio using stay ID (used by Food & Beverage module)
+export async function addFolioItemByStayId(
+  stayId: string,
+  description: string,
+  amount: number,
+  chargeType: string = 'room_charge'
+) {
+  const folioId = await getFolioIdByStayId(stayId)
+  if (!folioId) {
+    throw new Error(`No open folio found for stay ${stayId}`)
+  }
+  await addFolioItem(folioId, description, amount, chargeType, 1, amount, null)
 }
 
 // Build the full financial event packet for a closed folio

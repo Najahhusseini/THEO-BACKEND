@@ -20,12 +20,14 @@ import guestsRoutes from './modules/guests/guests.routes'
 import maintenanceRoutes from './modules/maintenance/maintenance.routes'
 import { WebhookService } from './modules/webhook/webhook.service';
 import webhookRoutes from './modules/webhook/webhook.routes';
-import financialRoutes from './modules/financial/financial.routes'   // <-- ADD THIS
-import { authMiddleware } from './middleware/auth'
+import fbRoutes from './modules/foodbeverage/foodbeverage.routes';
+import financialRoutes from './modules/financial/financial.routes';
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
 import { markOccupiedRoomsDirty } from './modules/automation/dirty-room.service'
 import { registerListeners } from './events/listeners'
+import { db } from './db'
+import { tenants } from './db/schema'
 import 'dotenv/config'
 
 const app = new Hono()
@@ -82,12 +84,15 @@ app.use('/api/folio/*', authMiddleware)
 app.route('/api/folio', folioRoutes)
 
 app.use('/api/admin/*', authMiddleware)
-app.route('/api/admin', financialRoutes) 
+app.route('/api/admin', financialRoutes)
 
 app.use('/api/maintenance/*', authMiddleware)
 app.route('/api/maintenance', maintenanceRoutes)
 
-app.use('/api', webhookRoutes);
+app.use('/api', webhookRoutes)
+
+app.use('/api/food-beverage/*', authMiddleware)
+app.route('/api/food-beverage', fbRoutes)
 
 // Reservations: protect all except public-test
 app.use('/api/reservations/*', async (c, next) => {
@@ -135,8 +140,6 @@ const port = parseInt(process.env.PORT || '4000')
 function scheduleWebhookProcessing() {
   setInterval(async () => {
     try {
-      // In a real multi‑tenant system, you'd loop through all tenants
-      // For now, we assume a default tenant – you can adapt later
       const tenantsList = await db.select({ id: tenants.id }).from(tenants);
       for (const tenant of tenantsList) {
         const service = new WebhookService();
@@ -152,7 +155,6 @@ function scheduleWebhookProcessing() {
 }
 
 scheduleWebhookProcessing();
-
 
 serve({
   fetch: app.fetch,

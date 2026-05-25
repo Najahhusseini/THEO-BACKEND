@@ -62,7 +62,6 @@ auth.post('/login', async (c) => {
     const refreshToken = generateRefreshToken({
       staffId: staffMember.id,
       tenantId: staffMember.tenantId,
-      email: staffMember.email,
     })
 
     console.log('Login successful for:', staffMember.email)
@@ -76,7 +75,7 @@ auth.post('/login', async (c) => {
         email: staffMember.email,
         role: staffMember.role,
         isSuperAdmin: staffMember.isSuperAdmin,
-        amenities: tenant.amenities || [],          // ✅ NEW
+        amenities: staffMember.amenities || [],   // ✅ from staff table
       },
     })
   } catch (error) {
@@ -116,7 +115,7 @@ auth.post('/refresh', async (c) => {
   }
 })
 
-// Get current user info – now includes hotel amenities
+// Get current user info – now includes staff amenities
 auth.get('/me', async (c) => {
   try {
     const authHeader = c.req.header('Authorization')
@@ -138,9 +137,6 @@ auth.get('/me', async (c) => {
       return c.json({ error: 'Staff not found' }, 404)
     }
 
-    // Fetch tenant to get amenities
-    const tenant = await db.select().from(tenants).where(eq(tenants.id, staffMember[0].tenantId)).limit(1)
-
     return c.json({
       id: staffMember[0].id,
       name: staffMember[0].name,
@@ -148,7 +144,7 @@ auth.get('/me', async (c) => {
       role: staffMember[0].role,
       tenantId: staffMember[0].tenantId,
       isSuperAdmin: staffMember[0].isSuperAdmin,
-      amenities: tenant[0]?.amenities || [],        // ✅ NEW
+      amenities: staffMember[0].amenities || [],   // ✅ from staff table
     })
   } catch (error) {
     console.error('Me endpoint error:', error)
@@ -202,7 +198,6 @@ auth.post('/super-login', async (c) => {
     const refreshToken = generateRefreshToken({
       staffId: staffMember[0].id,
       tenantId: staffMember[0].tenantId,
-      email: staffMember[0].email,
     })
 
     console.log('Super‑admin login successful for:', staffMember[0].email)
@@ -216,6 +211,7 @@ auth.post('/super-login', async (c) => {
         email: staffMember[0].email,
         role: staffMember[0].role,
         isSuperAdmin: true,
+        amenities: staffMember[0].amenities || [],   // ✅ added for consistency
       },
     })
   } catch (error) {
