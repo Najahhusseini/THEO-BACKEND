@@ -28,11 +28,9 @@ tasks.get('/', async (c) => {
     let assignedTo = c.req.query('assignedTo')
     const status = c.req.query('status')
     
-    // Handle "me" filter – convert to actual staff ID
     if (assignedTo === 'me') {
         assignedTo = user.staffId
     }
-    // If assignedTo is 'all' or empty, pass undefined to service (no filter)
     if (assignedTo === 'all' || assignedTo === '') {
         assignedTo = undefined
     }
@@ -41,12 +39,43 @@ tasks.get('/', async (c) => {
     return c.json(tasksList)
 })
 
-// Update task status
+// Update task status – with auto‑return for maintenance tasks
 tasks.patch('/:taskId/status', async (c) => {
     const user = c.get('user')
     const { taskId } = c.req.param()
     const { status } = await c.req.json()
+
+    // First, update the task status
     const task = await updateTaskStatus(taskId, status, user.staffId)
+
+    // ✅ NEW: Auto‑return room from maintenance if task completed and has room_id
+    if (status === 'completed' && task && task.room_id) {
+        // Check if the room is currently out of order
+        const roomCheck = await db.execute(sql`
+            SELECT out_of_order FROM rooms WHERE id = ${task.room_id}
+        `)
+        if (roomCheck.rows[0]?.out_of_order === true) {
+            // Return room to service: remove OOO flag, set status to dirty, create cleaning request
+            await db.transaction(async (tx) => {
+                await tx.execute(sql`
+                    UPDATE rooms 
+                    SET out_of_order = false, 
+                        out_of_order_reason = NULL, 
+                        out_of_order_since = NULL,
+                        status = 'dirty',
+                        last_status_change = NOW()
+                    WHERE id = ${task.room_id}
+                `)
+                // Create a cleaning request for this room
+                await tx.execute(sql`
+                    INSERT INTO cleaning_requests (room_id, status, priority, requested_by, created_at)
+                    VALUES (${task.room_id}, 'pending', 'high', ${user.staffId}, NOW())
+                `)
+            })
+            console.log(`🔧 Room ${task.room_id} returned to service after maintenance task ${taskId}`)
+        }
+    }
+
     return c.json(task)
 })
 
@@ -63,7 +92,6 @@ tasks.patch('/:taskId/inspect-complete', async (c) => {
         const user = c.get('user')
         const { taskId } = c.req.param()
         
-        // Get task details and verify it's assigned to current user
         const task = await db.execute(sql`
             SELECT * FROM tasks WHERE id = ${taskId} AND assigned_to = ${user.staffId}
         `)
@@ -71,18 +99,15 @@ tasks.patch('/:taskId/inspect-complete', async (c) => {
             return c.json({ error: 'Task not found or not assigned to you' }, 404)
         }
         
-        // Extract room number from title (format: "Inspect Room 103")
         const match = task.rows[0].title.match(/Inspect Room (\d+)/)
         if (match) {
             const roomNumber = match[1]
-            // Update room status to inspected
             await db.execute(sql`
                 UPDATE rooms SET cleaning_status = 'inspected' 
                 WHERE room_number = ${roomNumber} AND tenant_id = ${user.tenantId}
             `)
         }
         
-        // Mark task as completed
         await db.execute(sql`
             UPDATE tasks SET status = 'completed', completed_at = NOW() WHERE id = ${taskId}
         `)

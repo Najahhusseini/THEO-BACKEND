@@ -27,6 +27,29 @@ rooms.patch('/:roomId/status', async (c) => {
   return c.json(result)
 })
 
+// Get room price by room number (for extend stay modal)
+rooms.get('/price', async (c) => {
+  const user = c.get('user')
+  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+
+  const roomNumber = c.req.query('room_number')
+  if (!roomNumber) {
+    return c.json({ error: 'room_number query parameter required' }, 400)
+  }
+
+  try {
+    const result = await db.execute(sql`
+      SELECT price_per_night FROM rooms
+      WHERE room_number = ${roomNumber} AND tenant_id = ${user.tenantId}
+    `)
+    const price = result.rows[0]?.price_per_night || 0
+    return c.json({ price_per_night: parseFloat(price) })
+  } catch (err: any) {
+    console.error('Room price error:', err)
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 // Update room price (only when vacant and not expecting anyone today)
 rooms.patch('/:roomId/price', async (c) => {
   const user = c.get('user')
@@ -80,7 +103,7 @@ rooms.patch('/:roomId/price', async (c) => {
   }
 })
 
-// ✅ NEW: Update room notes
+// Update room notes
 rooms.patch('/:roomId/notes', async (c) => {
   const user = c.get('user')
   if (!user) return c.json({ error: 'Unauthorized' }, 401)

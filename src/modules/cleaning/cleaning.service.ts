@@ -50,7 +50,7 @@ export async function getRoomsWithCleaning(tenantId: string) {
             cr.status as request_status,
             cr.request_type,
             cr.assigned_to,
-            cr.assigned_to as assigned_to_id,               -- ✅ NEW
+            cr.assigned_to as assigned_to_id,
             cr.started_at,
             cr.duration_seconds,
             COALESCE(assigned.name, assigned_cleaner.name) as assigned_to_name,
@@ -227,7 +227,6 @@ export async function assignCleaning(requestId: string, assignedTo: string) {
     const roomNumber = reqCheck.rows[0].room_number
     const requestType = reqCheck.rows[0].request_type
 
-    // Update cleaning request
     await db.execute(sql`
         UPDATE cleaning_requests 
         SET assigned_to = ${assignedTo}, 
@@ -236,14 +235,12 @@ export async function assignCleaning(requestId: string, assignedTo: string) {
         WHERE id = ${requestId}
     `)
 
-    // Update rooms table with assigned cleaner
     await db.execute(sql`
         UPDATE rooms 
         SET assigned_cleaner_id = ${assignedTo}
         WHERE id = ${roomId}
     `)
 
-    // Emit event for cleaning request assignment
     eventBus.emit(tenantId, 'cleaning.assigned', {
         tenantId,
         roomId,
@@ -352,7 +349,7 @@ export async function updateCleaningRequestStatus(requestId: string, status: str
 // ============ UPDATE ROOM CLEANING STATUS ============
 
 export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: string, staffId: string) {
-    const allowed = ['dirty', 'cleaning', 'ready', 'inspected', 'awaiting']
+    const allowed = ['dirty', 'cleaning', 'ready', 'inspected']; // removed 'awaiting'
     if (!allowed.includes(cleaningStatus)) throw new Error('Invalid status')
 
     const staffCheck = await db.execute(sql`
@@ -362,8 +359,8 @@ export async function updateRoomCleaningStatus(roomId: string, cleaningStatus: s
     const role = staffCheck.rows[0].role
 
     if (role === 'head_housekeeping') {
-        if (!['dirty', 'inspected', 'awaiting'].includes(cleaningStatus)) {
-            throw new Error('Head of housekeeping can only change status to dirty, inspected, or awaiting.')
+        if (!['dirty', 'inspected'].includes(cleaningStatus)) { // removed 'awaiting'
+            throw new Error('Head of housekeeping can only change status to dirty or inspected.')
         }
     } else if (role === 'housekeeping') {
         if (!['cleaning', 'ready'].includes(cleaningStatus)) {
@@ -605,7 +602,7 @@ export async function setRoomOutOfOrder(
         out_of_order_reason = ${reason},
         out_of_order_since = NOW(),
         out_of_order_set_by = ${setByStaffId},
-        cleaning_status = 'awaiting'
+        cleaning_status = 'dirty'   // was 'awaiting'
     WHERE id = ${roomId}
   `)
 

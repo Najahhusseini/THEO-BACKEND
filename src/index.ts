@@ -25,9 +25,11 @@ import financialRoutes from './modules/financial/financial.routes';
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
 import { markOccupiedRoomsDirty } from './modules/automation/dirty-room.service'
+import { autoCheckoutOverdueStays, warnOverdueArrivals } from './modules/automation/auto-checkout.service'
 import { registerListeners } from './events/listeners'
 import { db } from './db'
 import { tenants } from './db/schema'
+import { checkStuckCleaningRooms } from './modules/automation/stuck-cleaning.service'   // ✅ ADDED
 import 'dotenv/config'
 
 const app = new Hono()
@@ -130,6 +132,38 @@ function scheduleDailyTask() {
 }
 
 scheduleDailyTask()
+
+// ✅ Stuck cleaning rooms check every 30 minutes
+setInterval(async () => {
+    try {
+        await checkStuckCleaningRooms()
+    } catch (err) {
+        console.error('Stuck cleaning check error:', err)
+    }
+}, 30 * 60 * 1000)
+
+// Run every day at 1:00 AM
+function scheduleAutoCheckout() {
+    const now = new Date()
+    const nextRun = new Date(now)
+    nextRun.setHours(1, 0, 0, 0)
+    if (now >= nextRun) {
+        nextRun.setDate(nextRun.getDate() + 1)
+    }
+    const msUntilRun = nextRun.getTime() - now.getTime()
+    
+    setTimeout(() => {
+        autoCheckoutOverdueStays().catch(console.error)
+        warnOverdueArrivals().catch(console.error)
+        // Repeat every 24 hours
+        setInterval(() => {
+            autoCheckoutOverdueStays().catch(console.error)
+            warnOverdueArrivals().catch(console.error)
+        }, 24 * 60 * 60 * 1000)
+    }, msUntilRun)
+}
+
+scheduleAutoCheckout()
 
 // API home
 app.get('/api', (c) => c.json({ message: 'THEO Mini API v1' }))

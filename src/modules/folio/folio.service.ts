@@ -12,19 +12,97 @@ export async function createFolio(stayId: string, reservationId: string, guestNa
   return result.rows[0]
 }
 
-// Close the folio (when guest checks out)
-export async function closeFolio(stayId: string, tenantId: string) {
-  // First close the folio
-  await db.execute(sql`
-    UPDATE folios SET status = 'closed', closed_at = NOW()
-    WHERE stay_id = ${stayId} AND status = 'open'
-  `)
+// Close the folio (when guest checks out) - ATOMIC & IDEMPOTENT
+export async function closeFolio(stayId: string, tenantId: string): Promise<{ success: boolean; alreadyClosed?: boolean }> {
+  return await db.transaction(async (tx) => {
+    const existingFolio = await tx.execute(sql`
+      SELECT id, status FROM folios WHERE stay_id = ${stayId} LIMIT 1
+    `)
+    if (!existingFolio.rows[0]) {
+      throw new Error(`No folio found for stay ${stayId}`)
+    }
+    if (existingFolio.rows[0].status === 'closed') {
+      return { success: true, alreadyClosed: true }
+    }
 
-  // Record financial event via the outbox
-  const financialService = new FinancialService()
-  const payload = await buildFinancialEventPayload(stayId)
-  await financialService.recordEvent(tenantId, 'guest.checked_out', payload)
+    await tx.execute(sql`
+      UPDATE folios SET status = 'closed', closed_at = NOW()
+      WHERE stay_id = ${stayId} AND status = 'open'
+    `)
+
+    const payload = await buildFinancialEventPayloadWithTx(stayId, tx)
+
+    const financialService = new FinancialService()
+    await financialService.recordEventWithTx(tenantId, 'guest.checked_out', payload, tx)
+
+    return { success: true }
+  })
 }
+
+async function buildFinancialEventPayloadWithTx(stayId: string, tx: any) {
+  const folioResult = await tx.execute(sql`
+    SELECT * FROM folios WHERE stay_id = ${stayId} LIMIT 1
+  `)
+  const folio = folioResult.rows[0]
+  if (!folio) throw new Error('Folio not found')
+
+  const itemsResult = await tx.execute(sql`
+    SELECT * FROM folio_items WHERE folio_id = ${folio.id} ORDER BY created_at
+  `)
+  const items = itemsResult.rows
+  const totalAmount = items.reduce((sum: number, item: any) => sum + parseFloat(item.amount), 0)
+
+  const stayResult = await tx.execute(sql`
+    SELECT s.*, r.room_number, r.tenant_id
+    FROM stays s
+    JOIN rooms r ON s.room_number = r.room_number
+    WHERE s.id = ${stayId}
+  `)
+  const stay = stayResult.rows[0]
+
+  const tenantResult = await tx.execute(sql`
+    SELECT id, name, subdomain, address, phone FROM tenants WHERE id = ${stay.tenant_id}
+  `)
+  const property = tenantResult.rows[0]
+
+  return {
+    event_id: crypto.randomUUID(),
+    event_type: 'folio.closed',
+    timestamp: new Date().toISOString(),
+    property: {
+      id: property.id,
+      name: property.name,
+      subdomain: property.subdomain,
+      address: property.address,
+      phone: property.phone,
+    },
+    guest: {
+      name: stay.guest_name,
+    },
+    stay: {
+      reservation_id: stay.reservation_id,
+      room_number: stay.room_number,
+      arrival: stay.arrival_date,
+      departure: stay.departure_date,
+      status: stay.status,
+    },
+    folio: {
+      folio_id: folio.id,
+      currency: 'USD',
+      items: items.map((item: any) => ({
+        description: item.description,
+        quantity: item.quantity || 1,
+        unit_price: parseFloat(item.unit_price) || parseFloat(item.amount),
+        amount: parseFloat(item.amount),
+        charge_type: item.charge_type,
+        tax_code: item.tax_code,
+      })),
+      total_amount: totalAmount,
+    },
+  }
+}
+
+// ========== REQUIRED EXPORTS ==========
 
 // Get a folio by stay ID
 export async function getFolioByStayId(stayId: string) {
@@ -66,7 +144,7 @@ export async function addFolioItem(
   `)
 }
 
-// NEW: Add a charge to a folio using stay ID (used by Food & Beverage module)
+// Add a charge to a folio using stay ID (used by Food & Beverage module)
 export async function addFolioItemByStayId(
   stayId: string,
   description: string,
@@ -80,11 +158,10 @@ export async function addFolioItemByStayId(
   await addFolioItem(folioId, description, amount, chargeType, 1, amount, null)
 }
 
-// Build the full financial event packet for a closed folio
+// Build the full financial event packet for a closed folio (public version, non-transactional)
 export async function buildFinancialEventPayload(stayId: string) {
   const folio = await getFolioByStayId(stayId)
   if (!folio) throw new Error('Folio not found')
-
   const items = await getFolioItems(folio.id)
   const totalAmount = items.reduce((sum: number, item: any) => sum + parseFloat(item.amount), 0)
 

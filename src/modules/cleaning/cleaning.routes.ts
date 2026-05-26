@@ -20,7 +20,6 @@ import {
     getOutOfOrderRooms
 } from './cleaning.service'
 
-
 const cleaning = new Hono()
 
 // Get all rooms with cleaning info (for Head of Housekeeping)
@@ -72,7 +71,7 @@ cleaning.post('/request', async (c) => {
     }
 })
 
-// Assign cleaning to a staff member (UPDATED to use assignCleaning which updates rooms.assigned_cleaner_id)
+// Assign cleaning to a staff member
 cleaning.post('/assign', async (c) => {
     try {
         const { requestId, assignedTo } = await c.req.json()
@@ -235,7 +234,6 @@ cleaning.patch('/rooms/:roomId/reassign', async (c) => {
         const { roomId } = c.req.param()
         const { newStaffId } = await c.req.json()
         
-        // Only head_housekeeping can reassign
         if (user.role !== 'head_housekeeping') {
             return c.json({ error: 'Unauthorized' }, 403)
         }
@@ -358,7 +356,6 @@ cleaning.patch('/rooms/:roomId/dnd', async (c) => {
         const { roomId } = c.req.param()
         const { doNotDisturb } = await c.req.json()
         
-        // Only housekeeping or head_housekeeping can update
         if (!['housekeeping', 'head_housekeeping'].includes(user.role)) {
             return c.json({ error: 'Unauthorized' }, 403)
         }
@@ -426,7 +423,6 @@ cleaning.patch('/supply-requests/:requestId', async (c) => {
             return c.json({ error: 'Invalid status' }, 400)
         }
         
-        // Get the request details
         const request = await db.execute(sql`
             SELECT item_name, quantity FROM supply_requests WHERE id = ${requestId}
         `)
@@ -435,9 +431,7 @@ cleaning.patch('/supply-requests/:requestId', async (c) => {
             return c.json({ error: 'Request not found' }, 404)
         }
         
-        // If approved, check inventory and deduct
         if (status === 'approved') {
-            // Check current stock
             const stock = await db.execute(sql`
                 SELECT quantity FROM inventory WHERE item_name = ${request.rows[0].item_name}
             `)
@@ -455,7 +449,6 @@ cleaning.patch('/supply-requests/:requestId', async (c) => {
                 }, 400)
             }
             
-            // Deduct from inventory
             await db.execute(sql`
                 UPDATE inventory 
                 SET quantity = quantity - ${requestedQuantity},
@@ -464,7 +457,6 @@ cleaning.patch('/supply-requests/:requestId', async (c) => {
             `)
         }
         
-        // Update request status
         await db.execute(sql`
             UPDATE supply_requests 
             SET status = ${status},
@@ -536,37 +528,11 @@ cleaning.post('/staff-supply-request', async (c) => {
     }
 })
 
-// Head of housekeeping marks room as awaiting new guest (final clean state)
-cleaning.patch('/rooms/:roomId/awaiting', async (c) => {
-    try {
-        const user = c.get('user');
-        const { roomId } = c.req.param();
-        
-        // Only head_housekeeping can perform this action
-        if (user.role !== 'head_housekeeping') {
-            return c.json({ error: 'Unauthorized' }, 403);
-        }
-        
-        await db.execute(sql`
-            UPDATE rooms 
-            SET cleaning_status = 'awaiting', 
-                last_cleaning_update = NOW(),
-                last_updated_by = ${user.staffId}
-            WHERE id = ${roomId}
-        `);
-        
-        return c.json({ success: true });
-    } catch (error) {
-        console.error(error);
-        return c.json({ error: 'Failed to update status' }, 500)
-    }
-});
-
 // ============ PERFORMANCE ENDPOINT ============
 // Get completed cleaning tasks with duration (for head of housekeeping)
 cleaning.get('/completed-tasks', async (c) => {
     try {
-        const user = c.get('user');
+        const user = c.get('user')
         const result = await db.execute(sql`
             SELECT 
                 cr.id,
@@ -584,14 +550,13 @@ cleaning.get('/completed-tasks', async (c) => {
               AND cr.duration_seconds IS NOT NULL
             ORDER BY cr.completed_at DESC
             LIMIT 500
-        `);
-        return c.json(result.rows);
+        `)
+        return c.json(result.rows)
     } catch (error) {
-        console.error(error);
-        return c.json({ error: 'Failed to fetch completed tasks' }, 500);
+        console.error(error)
+        return c.json({ error: 'Failed to fetch completed tasks' }, 500)
     }
-});
-
+})
 
 // ============ OUT OF ORDER ROUTES ============
 
@@ -606,7 +571,6 @@ cleaning.post('/rooms/:roomId/out-of-order', async (c) => {
       return c.json({ error: 'Reason is required for out of order' }, 400)
     }
     
-    // Only head_housekeeping, admin, or manager can do this
     if (!['head_housekeeping', 'admin', 'manager'].includes(user.role)) {
       return c.json({ error: 'Unauthorized - Only Head of Housekeeping can mark rooms out of order' }, 403)
     }
@@ -624,7 +588,6 @@ cleaning.delete('/rooms/:roomId/out-of-order', async (c) => {
     const user = c.get('user')
     const { roomId } = c.req.param()
     
-    // Only head_housekeeping, admin, or manager can do this
     if (!['head_housekeeping', 'admin', 'manager'].includes(user.role)) {
       return c.json({ error: 'Unauthorized - Only Head of Housekeeping can remove out of order status' }, 403)
     }

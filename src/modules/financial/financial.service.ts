@@ -53,12 +53,44 @@ export class FinancialService {
     return { success: true, eventId };
   }
 
-  async createEvent(data: Omit<NewFinancialEvent, 'id' | 'createdAt' | 'updatedAt'>) {
-    const [event] = await db.insert(financialEvents).values(data).returning();
+  async createEvent(data: Omit<NewFinancialEvent, 'id' | 'createdAt' | 'updatedAt'>, tx?: any) {
+    const executor = tx || db;
+    const [event] = await executor.insert(financialEvents).values(data).returning();
     return event;
   }
 
-  async recordEvent(tenantId: string, type: string, payload: any) {
-    return this.createEvent({ tenantId, type, payload, status: 'pending' });
+  // ✅ FIX: use eventType instead of type
+  async recordEvent(tenantId: string, eventType: string, payload: any, tx?: any) {
+    let serialized: any;
+    try {
+      serialized = payload;
+      JSON.stringify(serialized);
+    } catch {
+      throw new Error('Payload is not JSON‑serializable');
+    }
+    return this.createEvent({ tenantId, eventType, payload: serialized, status: 'pending' }, tx);
+  }
+
+  async recordEventWithTx(tenantId: string, eventType: string, payload: any, tx: any) {
+    return this.recordEvent(tenantId, eventType, payload, tx);
+  }
+
+  async retryAllFailed(tenantId: string, batchSize = 10) {
+    const events = await db
+      .select()
+      .from(financialEvents)
+      .where(and(eq(financialEvents.tenantId, tenantId), eq(financialEvents.status, 'failed')))
+      .limit(batchSize);
+
+    let retried = 0;
+    for (const event of events) {
+      try {
+        await this.retryEvent(event.id, tenantId);
+        retried++;
+      } catch (err) {
+        console.error(`Failed to retry event ${event.id}:`, err);
+      }
+    }
+    return { retried };
   }
 }
