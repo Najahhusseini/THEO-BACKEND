@@ -5,18 +5,18 @@ import { FinancialService } from '../financial/financial.service'
 // Create a folio for a stay (called when a reservation is confirmed)
 export async function createFolio(stayId: string, reservationId: string, guestName: string) {
   const result = await db.execute(sql`
-    INSERT INTO folios (stay_id, reservation_id, guest_name, status)
-    VALUES (${stayId}, ${reservationId}, ${guestName}, 'open')
+    INSERT INTO folios (stay_id, reservation_id, guest_name, status, version)
+    VALUES (${stayId}, ${reservationId}, ${guestName}, 'open', 1)
     RETURNING *
   `)
   return result.rows[0]
 }
 
-// Close the folio (when guest checks out) - ATOMIC & IDEMPOTENT
+// Close the folio (when guest checks out) - ATOMIC & IDEMPOTENT with version check
 export async function closeFolio(stayId: string, tenantId: string): Promise<{ success: boolean; alreadyClosed?: boolean }> {
   return await db.transaction(async (tx) => {
     const existingFolio = await tx.execute(sql`
-      SELECT id, status FROM folios WHERE stay_id = ${stayId} LIMIT 1
+      SELECT id, status, version FROM folios WHERE stay_id = ${stayId} LIMIT 1
     `)
     if (!existingFolio.rows[0]) {
       throw new Error(`No folio found for stay ${stayId}`)
@@ -25,13 +25,20 @@ export async function closeFolio(stayId: string, tenantId: string): Promise<{ su
       return { success: true, alreadyClosed: true }
     }
 
-    await tx.execute(sql`
-      UPDATE folios SET status = 'closed', closed_at = NOW()
-      WHERE stay_id = ${stayId} AND status = 'open'
+    const currentVersion = existingFolio.rows[0].version
+
+    // Update folio – close and increment version
+    const updateResult = await tx.execute(sql`
+      UPDATE folios 
+      SET status = 'closed', closed_at = NOW(), version = ${currentVersion + 1}
+      WHERE stay_id = ${stayId} AND status = 'open' AND version = ${currentVersion}
+      RETURNING id
     `)
+    if (updateResult.rows.length === 0) {
+      throw new Error('Folio was modified by another user. Please refresh and try again.')
+    }
 
     const payload = await buildFinancialEventPayloadWithTx(stayId, tx)
-
     const financialService = new FinancialService()
     await financialService.recordEventWithTx(tenantId, 'guest.checked_out', payload, tx)
 
@@ -128,7 +135,7 @@ export async function getFolioItems(folioId: string) {
   return result.rows
 }
 
-// Add a charge/payment/adjustment to a folio (by folio ID)
+// Add a charge/payment/adjustment to a folio (by folio ID) with optimistic locking
 export async function addFolioItem(
   folioId: string,
   description: string,
@@ -138,10 +145,28 @@ export async function addFolioItem(
   unitPrice: number | null = null,
   taxCode: string | null = null
 ) {
-  await db.execute(sql`
-    INSERT INTO folio_items (folio_id, description, amount, charge_type, quantity, unit_price, tax_code)
-    VALUES (${folioId}, ${description}, ${amount}, ${chargeType}, ${quantity}, ${unitPrice || amount}, ${taxCode})
-  `)
+  await db.transaction(async (tx) => {
+    // Lock the folio row and get current version
+    const folio = await tx.execute(sql`
+      SELECT version FROM folios WHERE id = ${folioId} FOR UPDATE
+    `)
+    if (!folio.rows[0]) throw new Error('Folio not found')
+    const currentVersion = folio.rows[0].version
+
+    // Insert the item
+    await tx.execute(sql`
+      INSERT INTO folio_items (folio_id, description, amount, charge_type, quantity, unit_price, tax_code)
+      VALUES (${folioId}, ${description}, ${amount}, ${chargeType}, ${quantity}, ${unitPrice || amount}, ${taxCode})
+    `)
+
+    // Update folio version (increment)
+    const updateResult = await tx.execute(sql`
+      UPDATE folios SET version = ${currentVersion + 1} WHERE id = ${folioId} AND version = ${currentVersion}
+    `)
+    if (updateResult.rowsAffected === 0) {
+      throw new Error('Folio was modified by another user. Please refresh and try again.')
+    }
+  })
 }
 
 // Add a charge to a folio using stay ID (used by Food & Beverage module)

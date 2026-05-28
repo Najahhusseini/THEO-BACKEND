@@ -31,7 +31,7 @@ export const staff = pgTable('staff', {
   active: boolean('active').default(true),
   passwordHash: text('password_hash'),
   isSuperAdmin: boolean('is_super_admin').default(false),
-  amenities: text('amenities').array(), // optional: store amenity list
+  amenities: text('amenities').array(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
@@ -45,11 +45,10 @@ export const rooms = pgTable('rooms', {
   roomType: text('room_type'),
   status: roomStatusEnum('status').default('dirty').notNull(),
   price_per_night: decimal('price_per_night', { precision: 10, scale: 2 }),
-  notes: jsonb('notes'), // operational sticky notes
+  notes: jsonb('notes'),
   lastStatusChange: timestamp('last_status_change').defaultNow().notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-  // Out of Order fields
   outOfOrder: boolean('out_of_order').default(false).notNull(),
   outOfOrderReason: text('out_of_order_reason'),
   outOfOrderSince: timestamp('out_of_order_since'),
@@ -140,6 +139,8 @@ export const financialEvents = pgTable('financial_events', {
   payload: jsonb('payload').notNull(),
   status: text('status').notNull().default('pending'),
   errorMessage: text('error_message'),
+  retryCount: integer('retry_count').default(0),
+  nextRetryAt: timestamp('next_retry_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 })
@@ -162,7 +163,7 @@ export const webhookConfigurations = pgTable('webhook_configurations', {
 export const orders = pgTable('orders', {
   id: uuid('id').defaultRandom().primaryKey(),
   tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  orderType: varchar('order_type', { length: 20 }).notNull(), // 'restaurant', 'bar'
+  orderType: varchar('order_type', { length: 20 }).notNull(),
   status: varchar('status', { length: 20 }).notNull().default('pending'),
   roomNumber: varchar('room_number', { length: 10 }),
   tableNumber: varchar('table_number', { length: 10 }),
@@ -170,7 +171,8 @@ export const orders = pgTable('orders', {
   stayId: uuid('stay_id').references(() => stays.id),
   totalAmount: decimal('total_amount', { precision: 10, scale: 2 }).notNull(),
   createdBy: uuid('created_by').references(() => staff.id),
-  assignedToStaffId: uuid('assigned_to_staff_id').references(() => staff.id), // ✅ Added this column
+  assignedToStaffId: uuid('assigned_to_staff_id').references(() => staff.id),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).unique(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   completedAt: timestamp('completed_at'),
 })
@@ -185,13 +187,14 @@ export const orderItems = pgTable('order_items', {
   total: decimal('total', { precision: 10, scale: 2 }).notNull(),
 })
 
-// Folios table (if not already defined elsewhere)
+// Folios table
 export const folios = pgTable('folios', {
   id: uuid('id').defaultRandom().primaryKey(),
   stayId: uuid('stay_id').notNull().references(() => stays.id, { onDelete: 'cascade' }),
   reservationId: uuid('reservation_id').notNull(),
   guestName: text('guest_name').notNull(),
   status: text('status').default('open'),
+  version: integer('version').default(1).notNull(),
   closedAt: timestamp('closed_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
@@ -208,6 +211,18 @@ export const folioItems = pgTable('folio_items', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 })
 
+// ✅ NEW: Error Logs table
+export const errorLogs = pgTable('error_logs', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  severity: varchar('severity', { length: 20 }).notNull(), // info, warn, error, critical
+  module: varchar('module', { length: 100 }),
+  message: text('message').notNull(),
+  details: jsonb('details'),
+  stack: text('stack'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+})
+
 // Types exports
 export type FinancialEvent = typeof financialEvents.$inferSelect;
 export type NewFinancialEvent = typeof financialEvents.$inferInsert;
@@ -219,3 +234,5 @@ export type Guest = typeof guests.$inferSelect;
 export type Stay = typeof stays.$inferSelect;
 export type Folio = typeof folios.$inferSelect;
 export type FolioItem = typeof folioItems.$inferSelect;
+export type ErrorLog = typeof errorLogs.$inferSelect;
+export type NewErrorLog = typeof errorLogs.$inferInsert;

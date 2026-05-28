@@ -1,7 +1,8 @@
 import { db } from '../../db';
-import { orders, orderItems, staff, stays } from '../../db/schema';
-import { eq, and, desc, inArray } from 'drizzle-orm';
+import { orders, orderItems, stays } from '../../db/schema';
+import { eq, and, desc } from 'drizzle-orm';
 import { addFolioItemByStayId } from '../folio/folio.service';
+import { logError, logInfo } from '../logging/logger.service';
 
 export class FoodBeverageService {
   async createOrder(data: {
@@ -14,8 +15,20 @@ export class FoodBeverageService {
     items: { name: string; quantity: number; unitPrice: number }[];
     createdBy: string;
     assignedTo?: string;
+    idempotencyKey?: string;
   }) {
-    // If roomNumber given but no stayId, try to find the active stay
+    // Idempotency check
+    if (data.idempotencyKey) {
+      const existing = await db.select().from(orders).where(
+        and(eq(orders.idempotencyKey, data.idempotencyKey), eq(orders.tenantId, data.tenantId))
+      ).limit(1);
+      if (existing.length) {
+        await logInfo(data.tenantId, 'order', `Order already exists for idempotency key ${data.idempotencyKey}`);
+        return existing[0];
+      }
+    }
+
+    // Auto‑resolve stayId from roomNumber if not provided
     let finalStayId = data.stayId;
     if (data.roomNumber && !finalStayId) {
       const activeStay = await db.select().from(stays).where(
@@ -30,7 +43,6 @@ export class FoodBeverageService {
       }
     }
 
-    // If still no stayId, order can still be created (e.g., table service) but won't post to folio later
     const total = data.items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
     const [order] = await db.insert(orders).values({
       tenantId: data.tenantId,
@@ -43,6 +55,7 @@ export class FoodBeverageService {
       totalAmount: total,
       createdBy: data.createdBy,
       assignedToStaffId: data.assignedTo,
+      idempotencyKey: data.idempotencyKey || null,
     }).returning();
 
     for (const item of data.items) {
@@ -54,20 +67,20 @@ export class FoodBeverageService {
         total: item.quantity * item.unitPrice,
       });
     }
+
+    await logInfo(data.tenantId, 'order', `Order ${order.id} created (${data.type})`);
     return order;
   }
 
   async updateOrderStatus(orderId: string, tenantId: string, status: 'in_progress' | 'completed' | 'cancelled', staffId?: string) {
-    // Use a database transaction to ensure atomicity
     return await db.transaction(async (tx) => {
-      // Lock the order row to prevent race conditions
+      // Lock the order row
       const existingOrder = await tx.select().from(orders).where(
         and(eq(orders.id, orderId), eq(orders.tenantId, tenantId))
       ).forUpdate().limit(1);
 
       if (!existingOrder.length) throw new Error('Order not found');
       if (existingOrder[0].status === 'completed') {
-        // Already completed – idempotent
         return { success: true, alreadyCompleted: true };
       }
       if (existingOrder[0].status === 'cancelled' && status === 'completed') {
@@ -81,15 +94,19 @@ export class FoodBeverageService {
         .where(and(eq(orders.id, orderId), eq(orders.tenantId, tenantId)));
 
       if (status === 'completed') {
-        // Fetch order with items inside the same transaction
         const order = await tx.query.orders.findFirst({
           where: eq(orders.id, orderId),
           with: { items: true },
         });
         if (order?.stayId) {
           const description = `${order.orderType === 'restaurant' ? 'Restaurant' : 'Bar'} order #${order.id.slice(0,8)}`;
-          // Pass the transaction client to the folio service
-          await addFolioItemByStayId(order.stayId, description, Number(order.totalAmount), order.orderType, tx);
+          try {
+            await addFolioItemByStayId(order.stayId, description, Number(order.totalAmount), order.orderType, tx);
+            await logInfo(tenantId, 'order', `Order ${orderId} completed and charged to folio`);
+          } catch (folioErr) {
+            await logError(tenantId, 'order', `Failed to charge folio for order ${orderId}`, folioErr);
+            throw folioErr; // rollback transaction
+          }
         }
       }
       return { success: true, alreadyCompleted: false };
@@ -103,7 +120,6 @@ export class FoodBeverageService {
     return { success: true };
   }
 
-  // Role‑based queries (unchanged)
   async getKitchenOrders(tenantId: string, statusFilter?: string) {
     let query = db.select().from(orders).where(and(
       eq(orders.tenantId, tenantId),

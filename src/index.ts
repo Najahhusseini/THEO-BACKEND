@@ -22,14 +22,15 @@ import { WebhookService } from './modules/webhook/webhook.service';
 import webhookRoutes from './modules/webhook/webhook.routes';
 import fbRoutes from './modules/foodbeverage/foodbeverage.routes';
 import financialRoutes from './modules/financial/financial.routes';
+import { autoCheckoutOverdueStays, warnOverdueArrivals } from './modules/automation/auto-checkout.service'
 import { authMiddleware } from './middleware/auth'
 import { errorHandler } from './middleware/errorHandler'
 import { markOccupiedRoomsDirty } from './modules/automation/dirty-room.service'
-import { autoCheckoutOverdueStays, warnOverdueArrivals } from './modules/automation/auto-checkout.service'
 import { registerListeners } from './events/listeners'
 import { db } from './db'
 import { tenants } from './db/schema'
-import { checkStuckCleaningRooms } from './modules/automation/stuck-cleaning.service'   // ✅ ADDED
+import { checkStuckCleaningRooms } from './modules/automation/stuck-cleaning.service'
+import { rateLimit } from './middleware/rateLimit'   // ✅ ADD
 import 'dotenv/config'
 
 const app = new Hono()
@@ -45,10 +46,21 @@ app.use('*', cors({
 app.use('*', secureHeaders())
 app.use('*', errorHandler)
 
-// Health check
+// Health check (exempt from rate limiting)
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }))
 
-// Auth routes (no auth needed)
+// ========== GLOBAL RATE LIMITER (IP‑based, exclude login endpoints) ==========
+app.use('/api/*', async (c, next) => {
+  const path = c.req.path
+  // Skip rate limiting for login endpoints (they have their own stricter limits)
+  if (path === '/api/auth/login' || path === '/api/auth/super-login') {
+    return next()
+  }
+  // Apply rate limit: 100 requests per minute per IP
+  return rateLimit({ windowMs: 60 * 1000, maxRequests: 100 })(c, next)
+})
+
+// Auth routes (no auth needed, but rate limited)
 app.route('/api/auth', auth)
 
 // Protected routes (auth required)
@@ -124,7 +136,6 @@ function scheduleDailyTask() {
 
   setTimeout(() => {
     markOccupiedRoomsDirty().catch(console.error)
-    // Then repeat every 24 hours
     setInterval(() => {
       markOccupiedRoomsDirty().catch(console.error)
     }, 24 * 60 * 60 * 1000)
@@ -142,7 +153,7 @@ setInterval(async () => {
     }
 }, 30 * 60 * 1000)
 
-// Run every day at 1:00 AM
+// Run every day at 1:00 AM (auto‑checkout)
 function scheduleAutoCheckout() {
     const now = new Date()
     const nextRun = new Date(now)
@@ -155,7 +166,6 @@ function scheduleAutoCheckout() {
     setTimeout(() => {
         autoCheckoutOverdueStays().catch(console.error)
         warnOverdueArrivals().catch(console.error)
-        // Repeat every 24 hours
         setInterval(() => {
             autoCheckoutOverdueStays().catch(console.error)
             warnOverdueArrivals().catch(console.error)
@@ -163,6 +173,8 @@ function scheduleAutoCheckout() {
     }, msUntilRun)
 }
 
+// You need to import autoCheckoutOverdueStays and warnOverdueArrivals at the top:
+// import { autoCheckoutOverdueStays, warnOverdueArrivals } from './modules/automation/auto-checkout.service'
 scheduleAutoCheckout()
 
 // API home
@@ -185,7 +197,7 @@ function scheduleWebhookProcessing() {
     } catch (err) {
       console.error('Webhook processing error:', err);
     }
-  }, 60 * 1000); // every 60 seconds
+  }, 60 * 1000);
 }
 
 scheduleWebhookProcessing();

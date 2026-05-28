@@ -2,6 +2,8 @@ import { Hono } from 'hono'
 import { db } from '../../db'
 import { sql } from 'drizzle-orm'
 import bcrypt from 'bcryptjs'
+import { errorLogs } from '../../db/schema'   // ✅ ADD
+import { desc, eq } from 'drizzle-orm'       // ✅ ADD
 
 const adminStaff = new Hono()
 
@@ -27,16 +29,13 @@ adminStaff.get('/', async (c) => {
       ORDER BY role, name
     `)
 
-    // Try to get max_staff, default to 20 if column doesn't exist
     let maxStaff = 20
     try {
       const tenant = await db.execute(sql`
         SELECT max_staff FROM tenants WHERE id = ${tenantId}
       `)
       maxStaff = tenant.rows[0]?.max_staff || 20
-    } catch {
-      // column might not exist yet
-    }
+    } catch {}
 
     return c.json({ staff: staffList.rows, maxStaff, currentCount: staffList.rows.length })
   } catch (err: any) {
@@ -54,7 +53,6 @@ adminStaff.post('/', async (c) => {
     return c.json({ error: 'Missing required fields' }, 400)
   }
 
-  // ✅ Updated allowed roles – includes kitchen and bar roles
   const allowedRoles = [
     'admin', 'manager', 'frontdesk', 'reservation_manager',
     'head_housekeeping', 'housekeeping',
@@ -66,7 +64,6 @@ adminStaff.post('/', async (c) => {
   }
 
   try {
-    // Check limit (safe if column missing)
     let maxStaff = 20
     try {
       const limitRes = await db.execute(sql`
@@ -82,7 +79,6 @@ adminStaff.post('/', async (c) => {
       return c.json({ error: `Staff limit reached (${maxStaff}). Please contact super‑admin.` }, 403)
     }
 
-    // Check duplicate email
     const existing = await db.execute(sql`
       SELECT id FROM staff WHERE email = ${email} AND tenant_id = ${tenantId}
     `)
@@ -109,7 +105,6 @@ adminStaff.patch('/:staffId', async (c) => {
   const { staffId } = c.req.param()
   const { role, active, phone } = await c.req.json()
 
-  // Validate role if provided
   const allowedRoles = [
     'admin', 'manager', 'frontdesk', 'reservation_manager',
     'head_housekeeping', 'housekeeping',
@@ -128,12 +123,8 @@ adminStaff.patch('/:staffId', async (c) => {
       return c.json({ error: 'Staff not found' }, 404)
     }
 
-    // Build SET clause explicitly (safe from SQL injection because values are parameterized or escaped)
     const setClauses: string[] = []
-
     if (role !== undefined) {
-      // Use parameterized query instead of string concatenation to be safe
-      // But since we're using sql.raw, we'll manually escape
       setClauses.push(`role = '${role.replace(/'/g, "''")}'`)
     }
     if (active !== undefined) {
@@ -184,6 +175,36 @@ adminStaff.get('/guests', async (c) => {
     console.error('Admin-staff guests error:', err)
     return c.json({ error: err.message }, 500)
   }
+})
+
+// ========== ERROR LOGS ENDPOINT ==========
+adminStaff.get('/error-logs', async (c) => {
+  const user = c.get('user')
+  if (!['admin', 'manager'].includes(user.role)) {
+    return c.json({ error: 'Forbidden' }, 403)
+  }
+
+  const { severity, limit = 100, offset = 0 } = c.req.query()
+  let query = db.select().from(errorLogs).where(eq(errorLogs.tenantId, user.tenantId))
+
+  if (severity && severity !== 'all') {
+    query = query.where(eq(errorLogs.severity, severity))
+  }
+
+  const logs = await query
+    .orderBy(desc(errorLogs.createdAt))
+    .limit(Number(limit))
+    .offset(Number(offset))
+
+  const totalResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(errorLogs)
+    .where(eq(errorLogs.tenantId, user.tenantId))
+
+  return c.json({
+    logs,
+    total: Number(totalResult[0]?.count || 0),
+  })
 })
 
 export default adminStaff

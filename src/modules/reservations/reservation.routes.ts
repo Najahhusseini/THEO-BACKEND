@@ -11,9 +11,10 @@ import {
     checkConflicts,
     sendPreArrivalEmails
 } from './reservation.service'
-import { closeFolio, addFolioItemByStayId } from '../folio/folio.service'   // ✅ ADDED
+import { closeFolio, addFolioItemByStayId } from '../folio/folio.service'
 import { z } from 'zod'
 import { eventBus } from '../../events/eventBus'
+import { logError, logInfo } from '../logging/logger.service'   // ✅ ADD
 
 const reservations = new Hono()
 
@@ -52,7 +53,7 @@ reservations.get('/calendar', async (c) => {
         `)
         return c.json(result.rows)
     } catch (err: any) {
-        console.error('Calendar error:', err)
+        await logError(user.tenantId, 'calendar', 'Failed to fetch calendar data', err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -69,7 +70,7 @@ reservations.post('/send-prearrival-emails', async (c) => {
         const result = await sendPreArrivalEmails(user.tenant_id, daysAhead)
         return c.json(result)
     } catch (err: any) {
-        console.error('Pre‑arrival email error:', err)
+        await logError(user.tenantId, 'prearrival-email', 'Failed to send pre‑arrival emails', err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -88,7 +89,7 @@ reservations.get('/stays', async (c) => {
         `)
         return c.json(result.rows)
     } catch (err) {
-        console.error(err)
+        await logError(user.tenantId, 'stays', 'Failed to fetch stays', err)
         return c.json({ error: 'Failed to fetch stays' }, 500)
     }
 })
@@ -117,6 +118,7 @@ reservations.post('/stays/:stayId/check-in', async (c) => {
             `)
             return stay
         })
+        await logInfo(user.tenantId, 'checkin', `Guest checked into stay ${stayId}`)
         eventBus.emit(user.tenantId, 'guest.checked_in', {
             tenantId: user.tenantId,
             stayId: result.id,
@@ -127,7 +129,7 @@ reservations.post('/stays/:stayId/check-in', async (c) => {
         })
         return c.json(result)
     } catch (err: any) {
-        console.error('Check‑in error:', err)
+        await logError(user.tenantId, 'checkin', `Check‑in failed for stay ${stayId}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -155,7 +157,7 @@ reservations.patch('/stays/:stayId/key', async (c) => {
         if (result.rows.length === 0) return c.json({ error: 'Stay not found' }, 404)
         return c.json(result.rows[0])
     } catch (err: any) {
-        console.error('Key update error:', err)
+        await logError(user.tenantId, 'key', `Key toggle failed for stay ${stayId}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -214,7 +216,7 @@ reservations.patch('/stays/:stayId/move-room', async (c) => {
         })
         return c.json({ success: true, roomNumber })
     } catch (err: any) {
-        console.error('Move room error:', err)
+        await logError(user.tenantId, 'move-room', `Room move failed for stay ${stayId}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -282,7 +284,7 @@ reservations.post('/:id/assign-room', async (c) => {
         })
         return c.json({ success: true, roomNumber })
     } catch (err: any) {
-        console.error('Assign room error:', err)
+        await logError(user.tenantId, 'assign-room', `Room assignment failed for reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -356,7 +358,7 @@ reservations.post('/', async (c) => {
         }
         return c.json(reservation, 201)
     } catch (err: any) {
-        console.error('Create error:', err)
+        await logError(user.tenantId, 'create-reservation', 'Failed to create reservation', err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -379,7 +381,7 @@ reservations.get('/', async (c) => {
         })
         return c.json(reservationsList)
     } catch (err: any) {
-        console.error('Get all error:', err)
+        await logError(user.tenantId, 'get-reservations', 'Failed to fetch reservations', err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -397,7 +399,7 @@ reservations.get('/:id', async (c) => {
         if (!reservation) return c.json({ error: 'Reservation not found' }, 404)
         return c.json(reservation)
     } catch (err: any) {
-        console.error('Get by ID error:', err)
+        await logError(user.tenantId, 'get-reservation', `Failed to fetch reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -421,7 +423,7 @@ reservations.put('/:id', async (c) => {
         })
         return c.json(updated)
     } catch (err: any) {
-        console.error('Update error:', err)
+        await logError(user.tenantId, 'update-reservation', `Failed to update reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -443,7 +445,7 @@ reservations.post('/:id/confirm', async (c) => {
         })
         return c.json(confirmed)
     } catch (err: any) {
-        console.error('Confirm error:', err)
+        await logError(user.tenantId, 'confirm-reservation', `Failed to confirm reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -465,7 +467,7 @@ reservations.post('/:id/cancel', async (c) => {
         })
         return c.json(cancelled)
     } catch (err: any) {
-        console.error('Cancel error:', err)
+        await logError(user.tenantId, 'cancel-reservation', `Failed to cancel reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -506,6 +508,7 @@ reservations.post('/stays/:stayId/check-out', async (c) => {
                 ON CONFLICT (room_id, status) DO NOTHING
             `)
         })
+        await logInfo(user.tenantId, 'checkout', `Guest checked out from stay ${stayId}`)
         eventBus.emit(user.tenantId, 'guest.checked_out', {
             tenantId: user.tenantId,
             stayId,
@@ -516,7 +519,7 @@ reservations.post('/stays/:stayId/check-out', async (c) => {
         })
         return c.json({ success: true })
     } catch (err: any) {
-        console.error('Check‑out error:', err)
+        await logError(user.tenantId, 'checkout', `Checkout failed for stay ${stayId}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -535,29 +538,22 @@ reservations.post('/stays/:stayId/extend', async (c) => {
 
     try {
         await db.transaction(async (tx) => {
-            // Lock the stay
             const stayResult = await tx.execute(sql`
                 SELECT * FROM stays WHERE id = ${stayId} FOR UPDATE
             `)
             if (stayResult.rows.length === 0) throw new Error('Stay not found')
             const stay = stayResult.rows[0]
-            if (stay.status !== 'checked_in') {
-                throw new Error('Can only extend a checked‑in stay')
-            }
+            if (stay.status !== 'checked_in') throw new Error('Can only extend a checked‑in stay')
 
             const newDeparture = new Date(newDepartureDate)
             const currentDeparture = new Date(stay.departure_date)
-            if (newDeparture <= currentDeparture) {
-                throw new Error('New departure date must be after current departure date')
-            }
+            if (newDeparture <= currentDeparture) throw new Error('New departure date must be after current departure date')
 
-            // Update stay departure date
             await tx.execute(sql`
                 UPDATE stays SET departure_date = ${newDepartureDate}, updated_at = NOW()
                 WHERE id = ${stayId}
             `)
 
-            // Also update the original reservation if linked
             if (stay.reservation_id) {
                 await tx.execute(sql`
                     UPDATE reservations SET departure_date = ${newDepartureDate}, updated_at = NOW()
@@ -565,7 +561,6 @@ reservations.post('/stays/:stayId/extend', async (c) => {
                 `)
             }
 
-            // Calculate extra nights and add folio charge
             const roomResult = await tx.execute(sql`
                 SELECT price_per_night FROM rooms WHERE room_number = ${stay.room_number} AND tenant_id = ${user.tenantId}
             `)
@@ -577,9 +572,10 @@ reservations.post('/stays/:stayId/extend', async (c) => {
                 await addFolioItemByStayId(stayId, description, extraAmount, 'room_charge', tx)
             }
         })
+        await logInfo(user.tenantId, 'extend-stay', `Stay ${stayId} extended to ${newDepartureDate}`)
         return c.json({ success: true })
     } catch (err: any) {
-        console.error('Extend stay error:', err)
+        await logError(user.tenantId, 'extend-stay', `Extend stay failed for stay ${stayId}`, err)
         return c.json({ error: err.message }, 500)
     }
 })
@@ -602,7 +598,7 @@ reservations.patch('/:id/notes', async (c) => {
         `)
         return c.json({ success: true })
     } catch (err: any) {
-        console.error('Notes update error:', err)
+        await logError(user.tenantId, 'update-notes', `Failed to update notes for reservation ${id}`, err)
         return c.json({ error: err.message }, 500)
     }
 })

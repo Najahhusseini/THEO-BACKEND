@@ -45,9 +45,16 @@ export class FinancialService {
     if (!event) throw new Error('Financial event not found');
     if (event.status !== 'failed') throw new Error('Only failed events can be retried');
 
+    // Reset for retry: status to pending, clear error, set next_retry_at to now, reset retry_count
     await db
       .update(financialEvents)
-      .set({ status: 'pending', errorMessage: null, updatedAt: new Date() })
+      .set({
+        status: 'pending',
+        errorMessage: null,
+        updatedAt: new Date(),
+        retryCount: 0,
+        nextRetryAt: new Date(),
+      })
       .where(eq(financialEvents.id, eventId));
 
     return { success: true, eventId };
@@ -55,11 +62,14 @@ export class FinancialService {
 
   async createEvent(data: Omit<NewFinancialEvent, 'id' | 'createdAt' | 'updatedAt'>, tx?: any) {
     const executor = tx || db;
-    const [event] = await executor.insert(financialEvents).values(data).returning();
+    const [event] = await executor.insert(financialEvents).values({
+      ...data,
+      retryCount: 0,
+      nextRetryAt: new Date(), // initially retry immediately
+    }).returning();
     return event;
   }
 
-  // ✅ FIX: use eventType instead of type
   async recordEvent(tenantId: string, eventType: string, payload: any, tx?: any) {
     let serialized: any;
     try {
